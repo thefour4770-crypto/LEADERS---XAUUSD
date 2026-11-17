@@ -1,0 +1,6 @@
+{
+  "name": "LEADERS XAUUSD",
+  "description": "XAUUSD Gold live market chart, 32 technical indicators, multi-timeframe analysis, and saved signal reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
