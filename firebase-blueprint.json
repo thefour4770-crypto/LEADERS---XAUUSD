@@ -1,0 +1,350 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authenticated trader account root document anchoring private XAUUSD signal and analysis history.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the account owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user record was first created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user record was last synchronized."
+        }
+      },
+      "required": ["uid", "createdAt", "updatedAt"]
+    },
+    "SureSignalRecord": {
+      "title": "SureSignalRecord",
+      "description": "Persisted SURE Auto-Scanner XAUUSD signal entry with immutable terminal outcome (TP_HIT, SL_HIT, AMBIGUOUS).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique signal UUID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who owns this signal record.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when the SURE signal triggered.",
+          "maxLength": 64
+        },
+        "createdServerAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp on document creation."
+        },
+        "updatedServerAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp on last state update."
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["BUY", "SELL"],
+          "description": "Signal direction."
+        },
+        "spotPrice": {
+          "type": "number",
+          "description": "Live XAUUSD spot entry price."
+        },
+        "confidencePct": {
+          "type": "number",
+          "description": "Signal confidence percentage."
+        },
+        "combinedScore": {
+          "type": "number",
+          "description": "Normalized directional composite score."
+        },
+        "setupScore": {
+          "type": "number",
+          "description": "Strict 0-100 multi-timeframe setup score."
+        },
+        "scoreCategory": {
+          "type": "string",
+          "enum": ["STRONG SIGNAL", "VALID SIGNAL", "WAIT", "NO TRADE"],
+          "description": "Setup score classification tier."
+        },
+        "adxValue": {
+          "type": "number",
+          "description": "ADX(14) trend strength reading at signal trigger."
+        },
+        "timeframes": {
+          "type": "array",
+          "description": "Evaluated timeframes (bounded list)."
+        },
+        "tradeLevels": {
+          "type": "object",
+          "description": "Reference entry, Stop Loss, Take Profit 1/2, and R:R levels."
+        },
+        "riskRewardRatio": {
+          "type": "string",
+          "description": "Formatted Risk:Reward ratio string.",
+          "maxLength": 32
+        },
+        "summary": {
+          "type": "string",
+          "description": "Human-readable technical summary of the SURE setup.",
+          "maxLength": 2000
+        },
+        "checks": {
+          "type": "array",
+          "description": "Mandatory SURE gate verification snapshot (bounded <= 16 items)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVE", "TP_HIT", "SL_HIT", "AMBIGUOUS"],
+          "description": "Lifecycle state; terminal states are strictly immutable."
+        },
+        "closedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when TP or SL closed the signal.",
+          "maxLength": 64
+        },
+        "closePrice": {
+          "type": "number",
+          "description": "Spot exit price on signal closure."
+        },
+        "pnlPoints": {
+          "type": "number",
+          "description": "Realized XAUUSD point PnL on closure."
+        },
+        "durationMs": {
+          "type": "number",
+          "description": "Elapsed milliseconds from signal trigger to closure."
+        },
+        "lastCheckedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of most recent TP/SL monitor check.",
+          "maxLength": 64
+        },
+        "lastCheckedPrice": {
+          "type": "number",
+          "description": "Most recent observed spot price during active monitoring."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "createdAt",
+        "createdServerAt",
+        "updatedServerAt",
+        "direction",
+        "spotPrice",
+        "confidencePct",
+        "combinedScore",
+        "setupScore",
+        "scoreCategory",
+        "adxValue",
+        "timeframes",
+        "tradeLevels",
+        "riskRewardRatio",
+        "summary",
+        "checks",
+        "status"
+      ]
+    },
+    "AnalysisReportRecord": {
+      "title": "AnalysisReportRecord",
+      "description": "Persisted snapshot of a completed manual ANALYSE XAUUSD multi-timeframe technical analysis report.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique report UUID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who generated this report.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when analysis completed.",
+          "maxLength": 64
+        },
+        "createdServerAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Firestore server timestamp on document creation."
+        },
+        "marketDataTimestamp": {
+          "type": "number",
+          "description": "Unix ms timestamp of verified spot/candle market data."
+        },
+        "freshness": {
+          "type": "string",
+          "enum": ["LIVE", "DELAYED"],
+          "description": "Market feed freshness at report generation."
+        },
+        "spotPrice": {
+          "type": "number",
+          "description": "XAUUSD spot mid price at report generation."
+        },
+        "spotBid": {
+          "type": "number",
+          "description": "XAUUSD bid price."
+        },
+        "spotAsk": {
+          "type": "number",
+          "description": "XAUUSD ask price."
+        },
+        "spotSource": {
+          "type": "string",
+          "description": "Spot price provider label.",
+          "maxLength": 200
+        },
+        "candleSource": {
+          "type": "string",
+          "description": "OHLCV candle provider label.",
+          "maxLength": 200
+        },
+        "classification": {
+          "type": "string",
+          "enum": ["BUY", "SELL", "HOLD"],
+          "description": "Overall technical classification."
+        },
+        "combinedScore": {
+          "type": "number",
+          "description": "Composite score across selected timeframes and indicators."
+        },
+        "signalConfidence": {
+          "type": "object",
+          "description": "Vote agreement confidence breakdown."
+        },
+        "selectedTimeframes": {
+          "type": "array",
+          "description": "Analyzed timeframes (1..10)."
+        },
+        "selectedIndicators": {
+          "type": "array",
+          "description": "Selected indicator configurations (1..50)."
+        },
+        "timeframeAnalyses": {
+          "type": "array",
+          "description": "Per-timeframe indicator breakdowns (1..10)."
+        },
+        "combinedMethodology": {
+          "type": "string",
+          "description": "Methodology explanation.",
+          "maxLength": 4000
+        },
+        "reasons": {
+          "type": "array",
+          "description": "Summary rationale points (<= 30)."
+        },
+        "agreements": {
+          "type": "array",
+          "description": "Indicator agreement bullet points (<= 30)."
+        },
+        "conflicts": {
+          "type": "array",
+          "description": "Indicator conflict bullet points (<= 30)."
+        },
+        "supportLevels": {
+          "type": "array",
+          "description": "Key support price levels (<= 20)."
+        },
+        "resistanceLevels": {
+          "type": "array",
+          "description": "Key resistance price levels (<= 20)."
+        },
+        "shortVsLongComparison": {
+          "type": "string",
+          "description": "Short vs long timeframe comparison.",
+          "maxLength": 4000
+        },
+        "uncertaintyExplanation": {
+          "type": "string",
+          "description": "Conflict/risk uncertainty summary.",
+          "maxLength": 4000
+        },
+        "tradeLevels": {
+          "type": "object",
+          "description": "Calculated SL/TP levels when directional setup exists."
+        },
+        "signalQualityChecks": {
+          "type": "array",
+          "description": "Mandatory quality gate checks (<= 30)."
+        },
+        "strategyEvaluation": {
+          "type": "object",
+          "description": "Strict multi-timeframe strategy evaluation details."
+        },
+        "newsProtection": {
+          "type": "object",
+          "description": "News protection state at analysis time."
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "createdAt",
+        "createdServerAt",
+        "marketDataTimestamp",
+        "freshness",
+        "spotPrice",
+        "spotBid",
+        "spotAsk",
+        "spotSource",
+        "candleSource",
+        "classification",
+        "combinedScore",
+        "selectedTimeframes",
+        "selectedIndicators",
+        "timeframeAnalyses",
+        "combinedMethodology",
+        "reasons",
+        "agreements",
+        "conflicts",
+        "supportLevels",
+        "resistanceLevels",
+        "shortVsLongComparison",
+        "uncertaintyExplanation"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Private root document for an authenticated trader."
+    },
+    "/users/{userId}/sureSignals/{signalId}": {
+      "schema": { "$ref": "#/entities/SureSignalRecord" },
+      "description": "Permanent per-user SURE Auto-Scanner signal history (active + completed TP_HIT/SL_HIT/AMBIGUOUS)."
+    },
+    "/users/{userId}/analysisReports/{reportId}": {
+      "schema": { "$ref": "#/entities/AnalysisReportRecord" },
+      "description": "Permanent per-user ANALYSE XAUUSD report history."
+    }
+  }
+}

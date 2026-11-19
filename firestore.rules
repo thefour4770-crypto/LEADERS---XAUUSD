@@ -1,0 +1,265 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function parentUserExistsAndOwned(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId))
+        && get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+    }
+
+    // 3. Entity Validation Blueprints (Synchronized with firebase-blueprint.json)
+    function isValidUserAccount(data, userId) {
+      return data.keys().hasAll(['uid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSureSignal(data, userId, signalId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'createdAt', 'createdServerAt', 'updatedServerAt',
+          'direction', 'spotPrice', 'confidencePct', 'combinedScore', 'setupScore',
+          'scoreCategory', 'adxValue', 'timeframes', 'tradeLevels',
+          'riskRewardRatio', 'summary', 'checks', 'status'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'createdAt', 'createdServerAt', 'updatedServerAt',
+          'direction', 'spotPrice', 'confidencePct', 'combinedScore', 'setupScore',
+          'scoreCategory', 'adxValue', 'timeframes', 'tradeLevels',
+          'riskRewardRatio', 'summary', 'checks', 'status',
+          'closedAt', 'closePrice', 'pnlPoints', 'durationMs',
+          'lastCheckedAt', 'lastCheckedPrice'
+        ])
+        && isValidId(data.id)
+        && data.id == signalId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64
+        && data.createdServerAt is timestamp
+        && data.updatedServerAt is timestamp
+        && data.direction in ['BUY', 'SELL']
+        && data.spotPrice is number && data.spotPrice > 0
+        && data.confidencePct is number && data.confidencePct >= 0 && data.confidencePct <= 100
+        && data.combinedScore is number
+        && data.setupScore is number && data.setupScore >= 0 && data.setupScore <= 100
+        && data.scoreCategory in ['STRONG SIGNAL', 'VALID SIGNAL', 'WAIT', 'NO TRADE']
+        && data.adxValue is number
+        && data.timeframes is list && data.timeframes.size() >= 1 && data.timeframes.size() <= 10
+        && data.timeframes[0] is string && data.timeframes[0].size() <= 10
+        && data.tradeLevels is map
+        && data.tradeLevels.referencePrice is number
+        && data.tradeLevels.stopLoss is number
+        && data.tradeLevels.takeProfit1 is number
+        && data.riskRewardRatio is string && data.riskRewardRatio.size() >= 1 && data.riskRewardRatio.size() <= 32
+        && data.summary is string && data.summary.size() <= 2000
+        && data.checks is list && data.checks.size() <= 16
+        && (data.checks.size() == 0 || data.checks[0] is map)
+        && data.status in ['ACTIVE', 'TP_HIT', 'SL_HIT', 'AMBIGUOUS']
+        && (data.status == 'ACTIVE' || ('closedAt' in data && data.closedAt is string && data.closedAt.size() >= 1 && data.closedAt.size() <= 64))
+        && (!('closedAt' in data) || (data.closedAt is string && data.closedAt.size() <= 64))
+        && (!('closePrice' in data) || data.closePrice is number)
+        && (!('pnlPoints' in data) || data.pnlPoints is number)
+        && (!('durationMs' in data) || (data.durationMs is number && data.durationMs >= 0))
+        && (!('lastCheckedAt' in data) || (data.lastCheckedAt is string && data.lastCheckedAt.size() <= 64))
+        && (!('lastCheckedPrice' in data) || data.lastCheckedPrice is number);
+    }
+
+    function isValidAnalysisReport(data, userId, reportId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'createdAt', 'createdServerAt', 'marketDataTimestamp',
+          'freshness', 'spotPrice', 'spotBid', 'spotAsk', 'spotSource', 'candleSource',
+          'classification', 'combinedScore', 'selectedTimeframes', 'selectedIndicators',
+          'timeframeAnalyses', 'combinedMethodology', 'reasons', 'agreements',
+          'conflicts', 'supportLevels', 'resistanceLevels', 'shortVsLongComparison',
+          'uncertaintyExplanation'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'createdAt', 'createdServerAt', 'marketDataTimestamp',
+          'freshness', 'spotPrice', 'spotBid', 'spotAsk', 'spotSource', 'candleSource',
+          'classification', 'combinedScore', 'signalConfidence', 'selectedTimeframes',
+          'selectedIndicators', 'timeframeAnalyses', 'combinedMethodology', 'reasons',
+          'agreements', 'conflicts', 'supportLevels', 'resistanceLevels',
+          'shortVsLongComparison', 'uncertaintyExplanation', 'tradeLevels',
+          'signalQualityChecks', 'strategyEvaluation', 'newsProtection'
+        ])
+        && isValidId(data.id)
+        && data.id == reportId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 64
+        && data.createdServerAt is timestamp
+        && data.marketDataTimestamp is number && data.marketDataTimestamp > 0
+        && data.freshness in ['LIVE', 'DELAYED']
+        && data.spotPrice is number && data.spotPrice > 0
+        && data.spotBid is number && data.spotBid >= 0
+        && data.spotAsk is number && data.spotAsk >= 0
+        && data.spotSource is string && data.spotSource.size() <= 200
+        && data.candleSource is string && data.candleSource.size() <= 200
+        && data.classification in ['BUY', 'SELL', 'HOLD']
+        && data.combinedScore is number
+        && data.selectedTimeframes is list && data.selectedTimeframes.size() >= 1 && data.selectedTimeframes.size() <= 10
+        && data.selectedTimeframes[0] is string && data.selectedTimeframes[0].size() <= 10
+        && data.selectedIndicators is list && data.selectedIndicators.size() >= 1 && data.selectedIndicators.size() <= 50
+        && data.selectedIndicators[0] is map
+        && data.timeframeAnalyses is list && data.timeframeAnalyses.size() >= 1 && data.timeframeAnalyses.size() <= 10
+        && data.timeframeAnalyses[0] is map
+        && data.combinedMethodology is string && data.combinedMethodology.size() <= 4000
+        && data.reasons is list && data.reasons.size() <= 30
+        && (data.reasons.size() == 0 || data.reasons[0] is string)
+        && data.agreements is list && data.agreements.size() <= 30
+        && (data.agreements.size() == 0 || data.agreements[0] is string)
+        && data.conflicts is list && data.conflicts.size() <= 30
+        && (data.conflicts.size() == 0 || data.conflicts[0] is string)
+        && data.supportLevels is list && data.supportLevels.size() <= 20
+        && (data.supportLevels.size() == 0 || data.supportLevels[0] is number)
+        && data.resistanceLevels is list && data.resistanceLevels.size() <= 20
+        && (data.resistanceLevels.size() == 0 || data.resistanceLevels[0] is number)
+        && data.shortVsLongComparison is string && data.shortVsLongComparison.size() <= 4000
+        && data.uncertaintyExplanation is string && data.uncertaintyExplanation.size() <= 4000
+        && (!('signalConfidence' in data) || data.signalConfidence is map)
+        && (!('tradeLevels' in data) || data.tradeLevels is map)
+        && (!('signalQualityChecks' in data) || (data.signalQualityChecks is list && data.signalQualityChecks.size() <= 30 && (data.signalQualityChecks.size() == 0 || data.signalQualityChecks[0] is map)))
+        && (!('strategyEvaluation' in data) || data.strategyEvaluation is map)
+        && (!('newsProtection' in data) || data.newsProtection is map);
+    }
+
+    // 4. Connection Validation Document (Authenticated single-doc read only)
+    match /test/connection {
+      allow get: if isSignedIn();
+      allow list, write: if false;
+    }
+
+    // 5. Private User Root & History Subcollections
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isOwner(userId)
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']);
+      allow delete: if false;
+
+      match /sureSignals/{signalId} {
+        allow get: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(signalId)
+          && parentUserExistsAndOwned(userId);
+        allow list: if isOwner(userId)
+          && isValidId(userId)
+          && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(signalId)
+          && isValidSureSignal(incoming(), userId, signalId)
+          && incoming().createdServerAt == request.time
+          && incoming().updatedServerAt == request.time
+          && parentUserExistsAndOwned(userId);
+        allow update: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(signalId)
+          && isValidSureSignal(incoming(), userId, signalId)
+          && existing().status == 'ACTIVE'
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().createdServerAt == existing().createdServerAt
+          && incoming().direction == existing().direction
+          && incoming().spotPrice == existing().spotPrice
+          && incoming().updatedServerAt == request.time
+          && (
+            (
+              incoming().status == 'ACTIVE'
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'lastCheckedAt', 'lastCheckedPrice', 'updatedServerAt'
+              ])
+            )
+            || (
+              incoming().status in ['TP_HIT', 'SL_HIT', 'AMBIGUOUS']
+              && ('closedAt' in incoming())
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'closedAt', 'closePrice', 'pnlPoints', 'durationMs',
+                'lastCheckedAt', 'lastCheckedPrice', 'updatedServerAt'
+              ])
+            )
+          )
+          && parentUserExistsAndOwned(userId);
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(signalId)
+          && existing().status == 'ACTIVE'
+          && parentUserExistsAndOwned(userId);
+      }
+
+      match /analysisReports/{reportId} {
+        allow get: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(reportId)
+          && parentUserExistsAndOwned(userId);
+        allow list: if isOwner(userId)
+          && isValidId(userId)
+          && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(reportId)
+          && isValidAnalysisReport(incoming(), userId, reportId)
+          && incoming().createdServerAt == request.time
+          && parentUserExistsAndOwned(userId);
+        allow update: if false;
+        allow delete: if isVerifiedUser()
+          && isOwner(userId)
+          && isValidId(userId)
+          && isValidId(reportId)
+          && parentUserExistsAndOwned(userId);
+      }
+    }
+  }
+}

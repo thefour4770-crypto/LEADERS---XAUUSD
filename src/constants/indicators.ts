@@ -1,4 +1,26 @@
-import type { IndicatorDefinition, SelectedIndicatorConfig } from '../types/market.ts';
+import type {
+  IndicatorDefinition,
+  IndicatorId,
+  SelectedIndicatorConfig,
+  Timeframe,
+} from '../types/market.ts';
+
+export const MANDATORY_STRATEGY_TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1H'];
+export const AUTO_PERFECT_TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1H'];
+
+export const AUTO_PERFECT_INDICATOR_IDS: IndicatorId[] = [
+  'ema',
+  'sma',
+  'supertrend',
+  'adx',
+  'dmi',
+  'rsi',
+  'macd',
+  'bollinger_bands',
+  'atr',
+  'volume',
+  'obv',
+];
 
 export const INDICATOR_CATALOG: IndicatorDefinition[] = [
   // ======================== TREND (13) ========================
@@ -124,7 +146,7 @@ export const INDICATOR_CATALOG: IndicatorDefinition[] = [
     category: 'TREND',
     description: 'Directional Movement Index comparing +DI and -DI buyer/seller pressure.',
     overlayOnChart: false,
-    defaultEnabled: false,
+    defaultEnabled: true,
     paramSpecs: [{ key: 'period', label: 'Period', min: 5, max: 50, step: 1, defaultValue: 14 }],
   },
   {
@@ -310,7 +332,7 @@ export const INDICATOR_CATALOG: IndicatorDefinition[] = [
     category: 'VOLUME',
     description: 'On-Balance Volume cumulative directional flow vs EMA.',
     overlayOnChart: false,
-    defaultEnabled: false,
+    defaultEnabled: true,
     paramSpecs: [{ key: 'emaPeriod', label: 'Signal EMA', min: 5, max: 50, step: 1, defaultValue: 20 }],
   },
   {
@@ -354,4 +376,33 @@ export function createDefaultIndicators(): SelectedIndicatorConfig[] {
       params,
     };
   });
+}
+
+export function createAutoPerfectIndicators(): SelectedIndicatorConfig[] {
+  const autoSet = new Set<IndicatorId>(AUTO_PERFECT_INDICATOR_IDS);
+  return INDICATOR_CATALOG.map((def) => {
+    const params: Record<string, number> = {};
+    for (const spec of def.paramSpecs) {
+      params[spec.key] = spec.defaultValue;
+    }
+    return {
+      id: def.id,
+      enabled: autoSet.has(def.id),
+      params,
+    };
+  });
+}
+
+export function isAutoPerfectPresetSelected(
+  timeframes: Timeframe[],
+  indicators: SelectedIndicatorConfig[]
+): boolean {
+  if (timeframes.length !== AUTO_PERFECT_TIMEFRAMES.length) return false;
+  const tfMatch = AUTO_PERFECT_TIMEFRAMES.every((tf) => timeframes.includes(tf));
+  if (!tfMatch) return false;
+
+  const autoSet = new Set<IndicatorId>(AUTO_PERFECT_INDICATOR_IDS);
+  const enabledIds = indicators.filter((i) => i.enabled).map((i) => i.id);
+  if (enabledIds.length !== autoSet.size) return false;
+  return enabledIds.every((id) => autoSet.has(id));
 }

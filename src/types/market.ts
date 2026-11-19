@@ -135,6 +135,7 @@ export interface IndicatorResult {
 export interface TimeframeAnalysis {
   timeframe: Timeframe;
   classification: SignalClassification;
+  confidencePct?: number; // 0 to 100
   candleCount: number;
   latestClose: number;
   latestTimestamp: number; // unix ms
@@ -154,6 +155,126 @@ export interface TimeframeAnalysis {
   summary: string;
 }
 
+export interface SignalConfidenceBreakdown {
+  scorePct: number; // 0 to 100
+  tier: 'HIGH' | 'MODERATE' | 'LOW';
+  agreeingVotes: number;
+  opposingVotes: number;
+  neutralVotes: number;
+  totalVotes: number;
+  buyVotes: number;
+  sellVotes: number;
+  holdVotes: number;
+  alignedTimeframes: number;
+  totalTimeframes: number;
+  summary: string;
+}
+
+export type SetupScoreCategory = 'STRONG SIGNAL' | 'VALID SIGNAL' | 'WAIT' | 'NO TRADE';
+export type StrictSignalAction = 'BUY' | 'SELL' | 'WAIT' | 'NO TRADE';
+
+export interface ScoreBreakdownItem {
+  category: string;
+  score: number;
+  maxScore: number;
+  detail: string;
+  passed: boolean;
+}
+
+export interface FeedIntegrityReport {
+  valid: boolean;
+  spotSource: string;
+  candleSource: string;
+  priceBasis: string;
+  spotPrice: number | null;
+  futuresPrice: number | null;
+  basisDiffUsd: number | null;
+  basisDiffPct: number | null;
+  spreadUsd: number | null;
+  spreadAcceptable: boolean;
+  staleFeeds: string[];
+  ohlcErrors: string[];
+  gapWarnings: string[];
+  closedCandlesVerified: boolean;
+  blockingReasons: string[];
+}
+
+export interface Trend1HSummary {
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  emaAlignment: string;
+  smaAlignment: string;
+  supertrendDir: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  adxValue: number | null;
+  plusDI: number | null;
+  minusDI: number | null;
+  summary: string;
+}
+
+export interface Structure15MSummary {
+  direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  bosDetected: 'BULLISH' | 'BEARISH' | 'NONE';
+  chochDetected: 'BULLISH' | 'BEARISH' | 'NONE';
+  lastSwingHigh: number | null;
+  lastSwingLow: number | null;
+  agreesWith1H: boolean;
+  rsiValue: number | null;
+  macdHist: number | null;
+  bollingerContext: string;
+  summary: string;
+}
+
+export interface Setup5MSummary {
+  direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  liquiditySweep: 'BULLISH_SWEEP' | 'BEARISH_SWEEP' | 'NONE';
+  retestConfirmed: boolean;
+  nearestSupport: number | null;
+  nearestResistance: number | null;
+  demandZone: [number, number] | null;
+  supplyZone: [number, number] | null;
+  volatilityRegime: 'VALID' | 'TOO_LOW' | 'TOO_HIGH';
+  atrValue: number | null;
+  volumeConfirmed: boolean;
+  obvAligned: boolean;
+  setupComplete: boolean;
+  summary: string;
+}
+
+export interface Confirmation1MSummary {
+  direction: 'BUY' | 'SELL' | 'WAIT';
+  closedCandleTime: number | null;
+  closedCandleBullish: boolean | null;
+  emaAligned: boolean;
+  supertrendAligned: boolean;
+  rsiMomentumOk: boolean;
+  macdMomentumOk: boolean;
+  dmiAligned: boolean;
+  volumeOk: boolean;
+  confirmed: boolean;
+  summary: string;
+}
+
+export interface StrictStrategyEvaluation {
+  mode: 'ANALYSIS' | 'SURE';
+  action: StrictSignalAction;
+  direction: 'BUY' | 'SELL' | 'NONE';
+  totalScore: number; // 0 to 100
+  scoreCategory: SetupScoreCategory;
+  scoreBreakdown: ScoreBreakdownItem[];
+  overallDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  trend1H: Trend1HSummary;
+  structure15M: Structure15MSummary;
+  setup5M: Setup5MSummary;
+  confirmation1M: Confirmation1MSummary;
+  all11Indicators: IndicatorResult[];
+  mandatoryGates: SignalGateCheck[];
+  confirmations: string[];
+  blockers: string[];
+  generatedAt: string;
+  validUntil: string;
+  feedIntegrity: FeedIntegrityReport;
+  newsProtection?: NewsProtectionState;
+}
+
 export interface AnalysisReport {
   id: string;
   createdAt: string; // ISO timestamp
@@ -166,6 +287,7 @@ export interface AnalysisReport {
   candleSource: string;
   classification: SignalClassification;
   combinedScore: number;
+  signalConfidence?: SignalConfidenceBreakdown;
   selectedTimeframes: Timeframe[];
   selectedIndicators: {
     id: IndicatorId;
@@ -184,6 +306,8 @@ export interface AnalysisReport {
   uncertaintyExplanation: string;
   tradeLevels?: TradeLevelsAnalysis;
   signalQualityChecks?: SignalGateCheck[];
+  strategyEvaluation?: StrictStrategyEvaluation;
+  newsProtection?: NewsProtectionState;
 }
 
 export interface SignalGateCheck {
@@ -221,3 +345,159 @@ export interface MarketSentiment24h {
   freshness: FreshnessStatus;
   source: string;
 }
+
+export interface SureSignalCheckItem {
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export type SureSignalStatus = 'ACTIVE' | 'TP_HIT' | 'SL_HIT' | 'AMBIGUOUS';
+
+export interface SureSignalEntry {
+  id: string;
+  createdAt: string; // ISO timestamp
+  direction: 'BUY' | 'SELL';
+  spotPrice: number;
+  confidencePct: number;
+  combinedScore: number;
+  setupScore: number; // 0 to 100 strict setup score
+  scoreCategory: SetupScoreCategory;
+  adxValue: number;
+  timeframes: Timeframe[];
+  tradeLevels: TradeLevelsAnalysis;
+  riskRewardRatio: string;
+  summary: string;
+  checks: SureSignalCheckItem[];
+  status: SureSignalStatus;
+  closedAt?: string;
+  closePrice?: number;
+  pnlPoints?: number;
+  durationMs?: number;
+  lastCheckedAt?: string;
+  lastCheckedPrice?: number;
+}
+
+export interface SureHistoryStats {
+  totalSignals: number;
+  tpHits: number;
+  slHits: number;
+  ambiguousOutcomes: number;
+  activeSignals: number;
+  winRatePct: number | null;
+  avgRiskReward: number | null;
+  avgDurationMs: number | null;
+}
+
+export interface SureSignalScanStatus {
+  scanning: boolean;
+  tradeLocked: boolean;
+  lastScannedAt: string | null;
+  nextScanAt: string | null;
+  scanIntervalMs: number;
+  monitoringMode: 'REALTIME_SPOT_BBO' | 'DELAYED_POLL' | 'UNAVAILABLE';
+  marketState: 'SURE_BUY' | 'SURE_SELL' | 'NO_SURE_SIGNAL' | 'NEWS_PAUSED' | 'UNAVAILABLE';
+  latestPrice: number | null;
+  latestConfidencePct: number;
+  latestScore: number;
+  latestSetupScore: number;
+  latestAdx: number | null;
+  reason: string;
+  checks: SureSignalCheckItem[];
+  activeSignal: SureSignalEntry | null;
+  history: SureSignalEntry[];
+  stats: SureHistoryStats;
+  feedIntegrity?: FeedIntegrityReport;
+  strategyEvaluation?: StrictStrategyEvaluation;
+  newsProtection?: NewsProtectionState;
+}
+
+export type NewsImpact = 'HIGH';
+export type NewsFeedStatus = 'LIVE' | 'CACHED' | 'STALE' | 'UNAVAILABLE';
+export type NewsBlockingReason =
+  | 'PRE_EVENT_WINDOW'
+  | 'EVENT_LIVE'
+  | 'POST_EVENT_COOLDOWN'
+  | 'POST_EVENT_VOLATILITY'
+  | 'NEWS_DATA_UNVERIFIED'
+  | 'NONE';
+
+export interface EconomicNewsEvent {
+  id: string;
+  title: string;
+  currency: 'USD';
+  impact: NewsImpact;
+  timestampMs: number;
+  isoUtc: string;
+  istDateKey: string; // YYYY-MM-DD in Asia/Kolkata
+  istDateLabel: string; // e.g. Wednesday, November 18
+  istYear: string; // e.g. 2026
+  istTimeLabel: string; // e.g. 7:00 PM
+  actual: string | null;
+  forecast: string | null;
+  previous: string | null;
+  source: string;
+}
+
+export interface NewsCalendarDayGroup {
+  dateKey: string;
+  dayLabel: string;
+  year: string;
+  isToday: boolean;
+  events: EconomicNewsEvent[];
+}
+
+export interface NewsProtectionConfig {
+  warningLeadMinutes: number;
+  preEventBlockMinutes: number;
+  minPostEventBlockMinutes: number;
+  maxPostEventBlockMinutes: number;
+  maxNewsCacheAgeMinutes: number;
+}
+
+export interface NewsMarketStability {
+  quoteLive: boolean;
+  spreadOk: boolean;
+  spreadUsd: number | null;
+  volatilityOk: boolean;
+  volatilityDetail: string;
+}
+
+export interface NewsProtectionState {
+  status: 'CLEAR' | 'WARNING_UPCOMING' | 'BLOCKED_NEWS' | 'BLOCKED_UNVERIFIED';
+  warningActive: boolean;
+  blocked: boolean;
+  safeFallbackActive: boolean;
+  reasonCode: NewsBlockingReason;
+  headline: string;
+  subtext: string;
+  activeEvent: EconomicNewsEvent | null;
+  upcomingEvent: EconomicNewsEvent | null;
+  minutesToEvent: number | null;
+  minutesSinceEvent: number | null;
+  marketStability: NewsMarketStability;
+  feedStatus: NewsFeedStatus;
+  dataStatusWarning: string | null;
+  evaluatedAt: string;
+  config: NewsProtectionConfig;
+}
+
+export interface EconomicCalendarPayload {
+  yearHeader: string;
+  timezone: 'Asia/Kolkata';
+  timezoneDisplay: 'IST (Asia/Kolkata)';
+  currencyFilter: 'USD';
+  impactFilter: 'HIGH';
+  startDateKey: string;
+  endDateKey: string;
+  days: NewsCalendarDayGroup[];
+  eventsCount: number;
+  feedStatus: NewsFeedStatus;
+  lastUpdatedAt: string | null;
+  sources: string[];
+  dataStatusWarning: string | null;
+  protection: NewsProtectionState;
+}
+
+
+

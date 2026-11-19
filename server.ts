@@ -4,10 +4,25 @@ import express from 'express';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import { ALL_TIMEFRAMES, type SelectedIndicatorConfig, type Timeframe } from './src/types/market.ts';
-import { DataUnavailableError, runFullAnalysis } from './server/analyzer.ts';
+import { DataUnavailableError, NewsBlockedError, runFullAnalysis } from './server/analyzer.ts';
 import { computeChartOverlays, computeHourlySentiment24h, computeSupportResistance } from './server/indicators.ts';
 import { fetchCandles, fetchLiveXauUsdQuote, subscribeLiveQuotes } from './server/marketData.ts';
+import {
+  evaluateCurrentNewsProtection,
+  getEconomicCalendarPayload,
+  startNewsBackgroundMonitor,
+  subscribeNewsStatusUpdates,
+} from './server/newsCalendar.ts';
 import { deleteReportById, getReportById, listReports } from './server/reportsStore.ts';
+import {
+  getSureSignalStatus,
+  handleSureSignalDeleted,
+  restoreActiveSureSignal,
+  runSureSignalScan,
+  startSureSignalBackgroundScanner,
+  subscribeSureSignalUpdates,
+} from './server/sureScanner.ts';
+import { deleteSureSignalById } from './server/sureSignalsStore.ts';
 
 interface CachedJpgExport {
   buffer: Buffer;
@@ -61,11 +76,28 @@ async function startServer() {
     };
 
     const unsubscribe = subscribeLiveQuotes(sendQuote);
+    const unsubscribeSure = subscribeSureSignalUpdates((evt) => {
+      if (res.writableEnded) return;
+      res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`);
+    });
+    const unsubscribeNews = subscribeNewsStatusUpdates((evt) => {
+      if (res.writableEnded) return;
+      res.write(`event: news_status\ndata: ${JSON.stringify(evt)}\n\n`);
+    });
     void fetchLiveXauUsdQuote().then((q) => {
       if (q.freshness !== 'UNAVAILABLE') {
         sendQuote(q);
       }
     });
+    void evaluateCurrentNewsProtection()
+      .then((protection) => {
+        if (!res.writableEnded) {
+          res.write(`event: news_status\ndata: ${JSON.stringify({ type: 'news_status', protection })}\n\n`);
+        }
+      })
+      .catch(() => {
+        // Initial news push failure is non-fatal for SSE stream
+      });
 
     const keepAlive = setInterval(() => {
       if (!res.writableEnded) {
@@ -76,10 +108,39 @@ async function startServer() {
     req.on('close', () => {
       clearInterval(keepAlive);
       unsubscribe();
+      unsubscribeSure();
+      unsubscribeNews();
       if (!res.writableEnded) {
         res.end();
       }
     });
+  });
+
+  app.get('/api/news/calendar', async (req, res) => {
+    try {
+      const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+      const quote = await fetchLiveXauUsdQuote().catch(() => null);
+      const calendar = await getEconomicCalendarPayload({ quote, forceRefresh });
+      res.json({ status: calendar.feedStatus, calendar });
+    } catch (err) {
+      res.status(503).json({
+        status: 'UNAVAILABLE',
+        error: err instanceof Error ? err.message : 'Unable to load economic calendar data',
+      });
+    }
+  });
+
+  app.get('/api/news/status', async (_req, res) => {
+    try {
+      const quote = await fetchLiveXauUsdQuote().catch(() => null);
+      const protection = await evaluateCurrentNewsProtection({ quote });
+      res.json({ status: protection.status, protection });
+    } catch (err) {
+      res.status(503).json({
+        status: 'UNAVAILABLE',
+        error: err instanceof Error ? err.message : 'Unable to evaluate economic news status',
+      });
+    }
   });
 
   app.get('/api/market/sentiment', async (_req, res) => {
@@ -167,6 +228,14 @@ async function startServer() {
       const report = await runFullAnalysis(validTimeframes, indicators);
       res.json({ status: 'OK', report });
     } catch (err) {
+      if (err instanceof NewsBlockedError) {
+        res.status(423).json({
+          status: err.protection.safeFallbackActive ? 'NEWS DATA UNVERIFIED' : 'HIGH IMPACT NEWS',
+          error: err.message,
+          newsProtection: err.protection,
+        });
+        return;
+      }
       if (err instanceof DataUnavailableError) {
         res.status(503).json({ status: 'DATA UNAVAILABLE', error: err.message });
         return;
@@ -203,6 +272,52 @@ async function startServer() {
       return;
     }
     res.json({ deleted: true, id: req.params.id });
+  });
+
+  app.get('/api/sure-signals', async (_req, res) => {
+    try {
+      let status = await getSureSignalStatus();
+      if (!status.lastScannedAt && !status.tradeLocked) {
+        status = await runSureSignalScan();
+      }
+      res.json({ status: 'OK', sureStatus: status });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to fetch sure signal status',
+      });
+    }
+  });
+
+  app.post('/api/sure-signals/sync-active', async (req, res) => {
+    try {
+      const entry = req.body?.entry;
+      const sureStatus = await restoreActiveSureSignal(entry);
+      res.json({ status: 'OK', sureStatus });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Unable to restore active sure signal',
+      });
+    }
+  });
+
+  app.delete('/api/sure-signals/:id', async (req, res) => {
+    const existing = await getSureSignalStatus();
+    const target = existing.history.find((item) => item.id === req.params.id);
+    if (!target) {
+      res.status(404).json({ error: 'Sure signal not found' });
+      return;
+    }
+    if (target.status !== 'ACTIVE') {
+      res.status(400).json({ error: 'Completed SURE signal history records are immutable and cannot be deleted.' });
+      return;
+    }
+    const deleted = await deleteSureSignalById(req.params.id);
+    if (!deleted) {
+      res.status(404).json({ error: 'Sure signal not found' });
+      return;
+    }
+    const status = await handleSureSignalDeleted(req.params.id);
+    res.json({ deleted: true, id: req.params.id, sureStatus: status });
   });
 
   app.post('/api/export/jpg', express.json({ limit: '8mb' }), (req, res) => {
@@ -285,6 +400,13 @@ async function startServer() {
         setHeaders(res, filePath) {
           if (filePath.endsWith('manifest.webmanifest')) {
             res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache');
+          } else if (
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('sw-notifications.js') ||
+            filePath.endsWith('registerSW.js')
+          ) {
+            res.setHeader('Cache-Control', 'no-cache');
           }
         },
       })
@@ -297,6 +419,10 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`LEADERS XAUUSD server listening on http://0.0.0.0:${PORT}`);
+    startNewsBackgroundMonitor(() => {
+      void runSureSignalScan();
+    });
+    startSureSignalBackgroundScanner();
   });
 }
 

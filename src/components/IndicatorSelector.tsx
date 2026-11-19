@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { CheckCheck, ChevronDown, ChevronUp, RotateCcw, SlidersHorizontal, X } from 'lucide-react';
 import { INDICATOR_CATALOG } from '../constants/indicators.ts';
 import type { IndicatorCategory, IndicatorId, SelectedIndicatorConfig } from '../types/market.ts';
@@ -19,7 +19,7 @@ const CATEGORIES: { key: IndicatorCategory; label: string }[] = [
   { key: 'VOLUME', label: 'Volume' },
 ];
 
-export function IndicatorSelector({
+export const IndicatorSelector = memo(function IndicatorSelector({
   indicators,
   onToggleIndicator,
   onUpdateParam,
@@ -31,16 +31,49 @@ export function IndicatorSelector({
   const [activeCategory, setActiveCategory] = useState<IndicatorCategory>('TREND');
   const [expandedParamId, setExpandedParamId] = useState<IndicatorId | null>(null);
 
-  const enabledConfigs = indicators.filter((i) => i.enabled);
-  const allEnabled = enabledConfigs.length === INDICATOR_CATALOG.length;
-  const enabledNames = enabledConfigs
-    .map((cfg) => INDICATOR_CATALOG.find((d) => d.id === cfg.id)?.name)
-    .filter(Boolean);
+  const indicatorById = useMemo(() => {
+    const map = new Map<IndicatorId, SelectedIndicatorConfig>();
+    for (const item of indicators) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [indicators]);
 
-  const categoryDefs = INDICATOR_CATALOG.filter((d) => d.category === activeCategory);
-  const categoryEnabledCount = categoryDefs.filter(
-    (d) => indicators.find((i) => i.id === d.id)?.enabled
-  ).length;
+  const enabledConfigs = useMemo(() => indicators.filter((i) => i.enabled), [indicators]);
+  const allEnabled = enabledConfigs.length === INDICATOR_CATALOG.length;
+
+  const enabledNames = useMemo(
+    () =>
+      enabledConfigs
+        .map((cfg) => INDICATOR_CATALOG.find((d) => d.id === cfg.id)?.name)
+        .filter((name): name is string => Boolean(name)),
+    [enabledConfigs]
+  );
+
+  const categoryDefs = useMemo(
+    () => INDICATOR_CATALOG.filter((d) => d.category === activeCategory),
+    [activeCategory]
+  );
+
+  const categoryEnabledCount = useMemo(
+    () => categoryDefs.filter((d) => indicatorById.get(d.id)?.enabled).length,
+    [categoryDefs, indicatorById]
+  );
+
+  const categorySummaries = useMemo(
+    () =>
+      CATEGORIES.map((cat) => {
+        const totalInCat = INDICATOR_CATALOG.filter((d) => d.category === cat.key);
+        const activeInCat = totalInCat.filter((d) => indicatorById.get(d.id)?.enabled).length;
+        return {
+          key: cat.key,
+          label: cat.label,
+          total: totalInCat.length,
+          active: activeInCat,
+        };
+      }),
+    [indicatorById]
+  );
 
   return (
     <>
@@ -88,27 +121,21 @@ export function IndicatorSelector({
 
         {/* Category Coverage Breakdown */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 font-mono tabular-nums">
-          {CATEGORIES.map((cat) => {
-            const totalInCat = INDICATOR_CATALOG.filter((d) => d.category === cat.key);
-            const activeInCat = totalInCat.filter(
-              (d) => indicators.find((i) => i.id === d.id)?.enabled
-            ).length;
-            return (
-              <div
-                key={cat.key}
-                className="rounded-xl border border-white/8 bg-[#0C0D11]/80 px-2.5 py-2 flex items-center justify-between gap-1.5"
+          {categorySummaries.map((cat) => (
+            <div
+              key={cat.key}
+              className="rounded-xl border border-white/8 bg-[#0C0D11]/80 px-2.5 py-2 flex items-center justify-between gap-1.5"
+            >
+              <span className="text-[11px] text-zinc-400 truncate">{cat.label}</span>
+              <span
+                className={`text-[11px] font-semibold ${
+                  cat.active > 0 ? 'text-[#F5D061]' : 'text-zinc-600'
+                }`}
               >
-                <span className="text-[11px] text-zinc-400 truncate">{cat.label}</span>
-                <span
-                  className={`text-[11px] font-semibold ${
-                    activeInCat > 0 ? 'text-[#F5D061]' : 'text-zinc-600'
-                  }`}
-                >
-                  {activeInCat}/{totalInCat.length}
-                </span>
-              </div>
-            );
-          })}
+                {cat.active}/{cat.total}
+              </span>
+            </div>
+          ))}
         </div>
 
         {/* Subtle Inner-Bordered Summary of Active Indicators */}
@@ -184,10 +211,7 @@ export function IndicatorSelector({
 
             {/* 4 Category Tabs */}
             <div className="grid grid-cols-4 gap-1 p-2 bg-[#0C0D11] border-b border-white/10">
-              {CATEGORIES.map((cat) => {
-                const count = INDICATOR_CATALOG.filter((d) => d.category === cat.key).filter(
-                  (d) => indicators.find((i) => i.id === d.id)?.enabled
-                ).length;
+              {categorySummaries.map((cat) => {
                 const active = activeCategory === cat.key;
                 return (
                   <button
@@ -200,7 +224,7 @@ export function IndicatorSelector({
                         : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
                     }`}
                   >
-                    {cat.label} ({count})
+                    {cat.label} ({cat.active})
                   </button>
                 );
               })}
@@ -232,7 +256,7 @@ export function IndicatorSelector({
             {/* Indicator List */}
             <div className="flex-1 overflow-y-auto divide-y divide-white/8">
               {categoryDefs.map((def) => {
-                const cfg = indicators.find((i) => i.id === def.id)!;
+                const cfg = indicatorById.get(def.id)!;
                 const isExpanded = expandedParamId === def.id;
                 return (
                   <div key={def.id} className="px-4 py-3 space-y-2.5">
@@ -356,4 +380,4 @@ export function IndicatorSelector({
       )}
     </>
   );
-}
+});

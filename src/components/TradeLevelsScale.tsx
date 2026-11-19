@@ -1,83 +1,144 @@
+import { memo, useMemo } from 'react';
 import type { SignalClassification, TradeLevelsAnalysis } from '../types/market.ts';
 
 interface TradeLevelsScaleProps {
   classification: SignalClassification;
   levels: TradeLevelsAnalysis;
+  singleTp?: boolean;
 }
 
-export function TradeLevelsScale({ classification, levels }: TradeLevelsScaleProps) {
-  const { referencePrice, stopLoss, takeProfit1, takeProfit2 } = levels;
-  const minPrice = Math.min(stopLoss, referencePrice, takeProfit1, takeProfit2);
-  const maxPrice = Math.max(stopLoss, referencePrice, takeProfit1, takeProfit2);
-  const span = Math.max(0.01, maxPrice - minPrice);
+export const TradeLevelsScale = memo(function TradeLevelsScale({
+  classification,
+  levels,
+  singleTp = true,
+}: TradeLevelsScaleProps) {
+  const { referencePrice, stopLoss, takeProfit1, takeProfit2, riskPoints } = levels;
 
-  const toPct = (price: number) => ((price - minPrice) / span) * 100;
+  const scaleMetrics = useMemo(() => {
+    const minPrice = singleTp
+      ? Math.min(stopLoss, referencePrice, takeProfit1)
+      : Math.min(stopLoss, referencePrice, takeProfit1, takeProfit2);
+    const maxPrice = singleTp
+      ? Math.max(stopLoss, referencePrice, takeProfit1)
+      : Math.max(stopLoss, referencePrice, takeProfit1, takeProfit2);
+    const span = Math.max(0.01, maxPrice - minPrice);
 
-  const slPct = toPct(stopLoss);
-  const spotPct = toPct(referencePrice);
-  const tp1Pct = toPct(takeProfit1);
-  const tp2Pct = toPct(takeProfit2);
+    const toPct = (price: number) => ((price - minPrice) / span) * 100;
 
-  // Segment bounds along ascending price axis
-  const riskLeft = Math.min(slPct, spotPct);
-  const riskWidth = Math.abs(spotPct - slPct);
+    const slPct = toPct(stopLoss);
+    const spotPct = toPct(referencePrice);
+    const tp1Pct = toPct(takeProfit1);
+    const tp2Pct = toPct(takeProfit2);
 
-  const tp1Left = Math.min(spotPct, tp1Pct);
-  const tp1Width = Math.abs(tp1Pct - spotPct);
+    const riskLeft = Math.min(slPct, spotPct);
+    const riskWidth = Math.abs(spotPct - slPct);
 
-  const tp2Left = Math.min(tp1Pct, tp2Pct);
-  const tp2Width = Math.abs(tp2Pct - tp1Pct);
+    const tp1Left = Math.min(spotPct, tp1Pct);
+    const tp1Width = Math.abs(tp1Pct - spotPct);
 
-  const markers = [
-    {
-      key: 'SL',
-      label: 'SL',
-      price: stopLoss,
-      pct: slPct,
-      delta: stopLoss - referencePrice,
-      colorClass: 'text-red-400',
-      dotClass: 'bg-red-400',
-    },
-    {
-      key: 'SPOT',
-      label: 'Spot',
-      price: referencePrice,
-      pct: spotPct,
-      delta: 0,
-      colorClass: 'text-[#F5D061]',
-      dotClass: 'bg-[#F5D061]',
-    },
-    {
-      key: 'TP1',
-      label: 'TP1',
-      price: takeProfit1,
-      pct: tp1Pct,
-      delta: takeProfit1 - referencePrice,
-      colorClass: 'text-emerald-400',
-      dotClass: 'bg-emerald-400',
-    },
-    {
-      key: 'TP2',
-      label: 'TP2',
-      price: takeProfit2,
-      pct: tp2Pct,
-      delta: takeProfit2 - referencePrice,
-      colorClass: 'text-emerald-300',
-      dotClass: 'bg-emerald-300',
-    },
-  ].sort((a, b) => a.price - b.price);
+    const tp2Left = Math.min(tp1Pct, tp2Pct);
+    const tp2Width = Math.abs(tp2Pct - tp1Pct);
 
-  const totalReward = Math.abs(takeProfit2 - referencePrice);
-  const totalDist = levels.riskPoints + totalReward;
-  const riskShare = totalDist > 0 ? (levels.riskPoints / totalDist) * 100 : 30;
-  const rewardShare = 100 - riskShare;
+    const markers = [
+      {
+        key: 'SL',
+        label: 'SL',
+        price: stopLoss,
+        pct: slPct,
+        delta: stopLoss - referencePrice,
+        colorClass: 'text-red-400',
+        dotClass: 'bg-red-400',
+      },
+      {
+        key: 'SPOT',
+        label: singleTp ? 'Entry' : 'Spot',
+        price: referencePrice,
+        pct: spotPct,
+        delta: 0,
+        colorClass: 'text-[#F5D061]',
+        dotClass: 'bg-[#F5D061]',
+      },
+      {
+        key: 'TP1',
+        label: singleTp ? 'TP' : 'TP1',
+        price: takeProfit1,
+        pct: tp1Pct,
+        delta: takeProfit1 - referencePrice,
+        colorClass: 'text-emerald-400',
+        dotClass: 'bg-emerald-400',
+      },
+      ...(!singleTp
+        ? [
+            {
+              key: 'TP2',
+              label: 'TP2',
+              price: takeProfit2,
+              pct: tp2Pct,
+              delta: takeProfit2 - referencePrice,
+              colorClass: 'text-emerald-300',
+              dotClass: 'bg-emerald-300',
+            },
+          ]
+        : []),
+    ].sort((a, b) => a.price - b.price);
+
+    const targetPrice = singleTp ? takeProfit1 : takeProfit2;
+    const totalReward = Math.abs(targetPrice - referencePrice);
+    const totalDist = riskPoints + totalReward;
+    const riskShare = totalDist > 0 ? (riskPoints / totalDist) * 100 : 30;
+    const rewardShare = 100 - riskShare;
+
+    return {
+      minPrice,
+      maxPrice,
+      slPct,
+      spotPct,
+      tp1Pct,
+      riskLeft,
+      riskWidth,
+      tp1Left,
+      tp1Width,
+      tp2Left,
+      tp2Width,
+      markers,
+      totalReward,
+      riskShare,
+      rewardShare,
+    };
+  }, [referencePrice, stopLoss, takeProfit1, takeProfit2, riskPoints, singleTp]);
+
+  const {
+    minPrice,
+    maxPrice,
+    slPct,
+    spotPct,
+    tp1Pct,
+    riskLeft,
+    riskWidth,
+    tp1Left,
+    tp1Width,
+    tp2Left,
+    tp2Width,
+    markers,
+    totalReward,
+    riskShare,
+    rewardShare,
+  } = scaleMetrics;
 
   return (
     <div className="rounded-xl bg-[#0D0E12] border border-white/8 p-3.5 space-y-3">
       {/* Scale Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
         <span className="text-zinc-300 font-semibold">
-          Price Target Scale ({classification === 'BUY' ? 'Long Range: SL → Spot → TP2' : 'Short Range: TP2 ← Spot ← SL'})
+          Price Target Scale (
+          {classification === 'BUY'
+            ? singleTp
+              ? 'Long Range: SL → Entry → TP'
+              : 'Long Range: SL → Spot → TP2'
+            : singleTp
+            ? 'Short Range: TP ← Entry ← SL'
+            : 'Short Range: TP2 ← Spot ← SL'}
+          )
         </span>
         <span className="text-zinc-400 tabular-nums">
           Range ${minPrice.toFixed(2)} – ${maxPrice.toFixed(2)}
@@ -109,15 +170,17 @@ export function TradeLevelsScale({ classification, levels }: TradeLevelsScalePro
             style={{ left: `${tp1Left}%`, width: `${tp1Width}%` }}
           />
           {/* TP2 Extended Reward Segment (TP1 <-> TP2) */}
-          <div
-            className="absolute top-0 bottom-0 bg-emerald-500/22"
-            style={{ left: `${tp2Left}%`, width: `${tp2Width}%` }}
-          />
+          {!singleTp && (
+            <div
+              className="absolute top-0 bottom-0 bg-emerald-500/22"
+              style={{ left: `${tp2Left}%`, width: `${tp2Width}%` }}
+            />
+          )}
 
-          {/* TP1 Milestone Divider */}
+          {/* TP Milestone Divider */}
           <div
             className="absolute top-0 bottom-0 w-0.5 bg-emerald-300"
-            style={{ left: `calc(${tp1Pct}% - 1px)` }}
+            style={{ left: `calc(${Math.min(99.5, Math.max(0.5, tp1Pct))}% - 1px)` }}
           />
           {/* SL Boundary Divider */}
           <div
@@ -136,7 +199,9 @@ export function TradeLevelsScale({ classification, levels }: TradeLevelsScalePro
       </div>
 
       {/* Ordered Price Milestones Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono tabular-nums">
+      <div
+        className={`grid grid-cols-1 ${singleTp ? 'sm:grid-cols-3' : 'sm:grid-cols-4'} gap-2 pt-1 font-mono tabular-nums`}
+      >
         {markers.map((m) => {
           const pctMove = referencePrice > 0 ? (m.delta / referencePrice) * 100 : 0;
           return (
@@ -167,7 +232,8 @@ export function TradeLevelsScale({ classification, levels }: TradeLevelsScalePro
         <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 tabular-nums">
           <span className="text-red-400">Risk Exposure (${levels.riskPoints.toFixed(2)})</span>
           <span className="text-emerald-400">
-            Target Reward up to TP2 (${totalReward.toFixed(2)} · {levels.rewardRiskRatio2})
+            {singleTp ? 'Target Reward up to TP' : 'Target Reward up to TP2'} ($
+            {totalReward.toFixed(2)} · {singleTp ? levels.rewardRiskRatio1 : levels.rewardRiskRatio2})
           </span>
         </div>
         <div className="h-1.5 w-full rounded-full overflow-hidden flex bg-[#181A20]">
@@ -177,4 +243,4 @@ export function TradeLevelsScale({ classification, levels }: TradeLevelsScalePro
       </div>
     </div>
   );
-}
+});

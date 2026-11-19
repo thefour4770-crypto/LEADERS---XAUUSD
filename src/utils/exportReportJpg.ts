@@ -1,4 +1,5 @@
 import type { AnalysisReport, SignalClassification } from '../types/market.ts';
+import { getReportSignalConfidence } from './signalConfidence.ts';
 
 const LOGICAL_WIDTH = 1080;
 const PADDING_X = 36;
@@ -186,6 +187,7 @@ function renderReportToCanvas(
   // 2. Primary Classification Card
   // -------------------------------------------------------------------------
   const biasColors = getBiasColors(report.classification);
+  const confidence = getReportSignalConfidence(report);
   const classCardH = 128;
   if (!dryRun) {
     drawRoundedRect(ctx, PADDING_X, y, CONTENT_WIDTH, classCardH, 16, biasColors.bg, biasColors.border, 1.5);
@@ -201,7 +203,7 @@ function renderReportToCanvas(
     ctx.font = '500 13px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.fillStyle = PALETTE.textSecondary;
     ctx.fillText(
-      `Composite Score: ${report.combinedScore >= 0 ? '+' : ''}${report.combinedScore.toFixed(3)}  ·  Timeframes: ${report.selectedTimeframes.join(', ')}`,
+      `Confidence: ${confidence.scorePct}% (${confidence.tier})  ·  Score: ${report.combinedScore >= 0 ? '+' : ''}${report.combinedScore.toFixed(3)}  ·  TF: ${report.selectedTimeframes.join(', ')}`,
       PADDING_X + 24,
       y + 96
     );
@@ -255,12 +257,12 @@ function renderReportToCanvas(
       ctx.textAlign = 'left';
 
       const gap = 14;
-      const boxW = (CONTENT_WIDTH - 48 - gap * 3) / 4;
+      const boxW = (CONTENT_WIDTH - 48 - gap * 2) / 3;
       const boxY = y + 50;
       const boxH = 82;
       const items = [
         {
-          label: 'Reference Spot',
+          label: 'Entry Spot',
           val: `$${lv.referencePrice.toFixed(2)}`,
           sub: 'Spot at analysis',
           color: PALETTE.textPrimary,
@@ -269,21 +271,14 @@ function renderReportToCanvas(
         {
           label: 'Stop Loss (SL)',
           val: `$${lv.stopLoss.toFixed(2)}`,
-          sub: `-$${lv.riskPoints.toFixed(2)} distance`,
+          sub: `-$${lv.riskPoints.toFixed(2)} risk`,
           color: PALETTE.sell,
           border: PALETTE.sellBorder,
         },
         {
-          label: 'Take Profit 1 (TP1)',
+          label: 'Take Profit (TP)',
           val: `$${lv.takeProfit1.toFixed(2)}`,
           sub: `R:R ${lv.rewardRiskRatio1}`,
-          color: PALETTE.buy,
-          border: PALETTE.buyBorder,
-        },
-        {
-          label: 'Take Profit 2 (TP2)',
-          val: `$${lv.takeProfit2.toFixed(2)}`,
-          sub: `R:R ${lv.rewardRiskRatio2}`,
           color: PALETTE.buy,
           border: PALETTE.buyBorder,
         },

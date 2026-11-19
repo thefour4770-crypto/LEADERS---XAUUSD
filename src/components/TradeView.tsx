@@ -1,41 +1,72 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertCircle, CandlestickChart, Eye, EyeOff, Maximize2, RefreshCw, Sparkles } from 'lucide-react';
-import { createDefaultIndicators } from '../constants/indicators.ts';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertCircle, AlertTriangle, Bell, BellOff, CandlestickChart, Check, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, FileText, Maximize2, Minus, RefreshCw, ShieldAlert, Sparkles, Trash2, TrendingDown, TrendingUp, Wand2 } from 'lucide-react';
+import {
+  AUTO_PERFECT_TIMEFRAMES,
+  createAutoPerfectIndicators,
+  createDefaultIndicators,
+  INDICATOR_CATALOG,
+  isAutoPerfectPresetSelected,
+} from '../constants/indicators.ts';
 import type {
   AnalysisReport,
+  Candle,
   CandleDataset,
   ChartOverlaySeries,
   IndicatorCategory,
   IndicatorId,
   MarketQuote,
   MarketSentiment24h,
+  NewsProtectionState,
   SelectedIndicatorConfig,
   Timeframe,
 } from '../types/market.ts';
-import { INDICATOR_CATALOG } from '../constants/indicators.ts';
+import {
+  enableAndTestPhoneAlerts,
+  getNotificationPermissionState,
+  isPhoneAlertsEnabled,
+  sendTestPhoneNotification,
+  setPhoneAlertsEnabledPref,
+  subscribeNotificationPermissionSync,
+  subscribePhoneAlertsPrefChange,
+  type NotificationPermissionState,
+} from '../utils/phoneNotifications.ts';
+import { getReportSignalConfidence } from '../utils/signalConfidence.ts';
 import { AnalysisProcessingModal } from './AnalysisProcessingModal.tsx';
 import { AnalysisResultView } from './AnalysisResultView.tsx';
 import { IndicatorSelector } from './IndicatorSelector.tsx';
 import { LeaderChartFullView } from './LeaderChartFullView.tsx';
 import { MarketSentimentWidget } from './MarketSentimentWidget.tsx';
+import { SmoothedPriceText } from './SmoothedPriceText.tsx';
 import { TimeframeSelector } from './TimeframeSelector.tsx';
 import { XauUsdChart } from './XauUsdChart.tsx';
+
+const EMPTY_CANDLES: Candle[] = [];
 
 interface TradeViewProps {
   quote: MarketQuote | null;
   quoteError: string | null;
+  reports: AnalysisReport[];
+  reportsLoading: boolean;
+  newsProtection: NewsProtectionState | null;
   onRefreshQuote: () => void;
   onReportSaved: (report: AnalysisReport) => void;
+  onDeleteReport: (id: string) => Promise<void>;
+  onNewsProtectionSync?: (protection: NewsProtectionState) => void;
 }
 
-export function TradeView({
+export const TradeView = memo(function TradeView({
   quote,
   quoteError,
+  reports,
+  reportsLoading,
+  newsProtection,
   onRefreshQuote,
   onReportSaved,
+  onDeleteReport,
+  onNewsProtectionSync,
 }: TradeViewProps) {
   const [activeChartTimeframe, setActiveChartTimeframe] = useState<Timeframe>('15m');
-  const [selectedTimeframes, setSelectedTimeframes] = useState<Timeframe[]>(['15m']);
+  const [selectedTimeframes, setSelectedTimeframes] = useState<Timeframe[]>(['1m', '5m', '15m', '1H']);
   const [indicators, setIndicators] = useState<SelectedIndicatorConfig[]>(() => createDefaultIndicators());
 
   const [dataset, setDataset] = useState<CandleDataset | null>(null);
@@ -56,23 +87,65 @@ export function TradeView({
   const [analysisErrStatus, setAnalysisErrStatus] = useState<string | null>(null);
   const [analysisErrMsg, setAnalysisErrMsg] = useState<string | null>(null);
   const [activeReport, setActiveReport] = useState<AnalysisReport | null>(null);
+  const [showAnalysisHistory, setShowAnalysisHistory] = useState(false);
+  const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
 
   const indicatorsRef = useRef(indicators);
   indicatorsRef.current = indicators;
-  const lastPriceRef = useRef<number | null>(null);
-  const [priceFlash, setPriceFlash] = useState<'up' | 'down' | null>(null);
+  const [phoneAlertsEnabled, setPhoneAlertsEnabled] = useState<boolean>(() => isPhoneAlertsEnabled());
+  const [notificationPerm, setNotificationPerm] = useState<NotificationPermissionState>(() =>
+    getNotificationPermissionState()
+  );
+  const [alertFeedback, setAlertFeedback] = useState<string | null>(null);
+  const [testingAlert, setTestingAlert] = useState(false);
 
   useEffect(() => {
-    const mid = quote?.freshness !== 'UNAVAILABLE' ? quote?.mid : undefined;
-    if (!mid || mid <= 0) return;
-    const prev = lastPriceRef.current;
-    lastPriceRef.current = mid;
-    if (prev !== null && mid !== prev) {
-      setPriceFlash(mid > prev ? 'up' : 'down');
-      const id = window.setTimeout(() => setPriceFlash(null), 450);
-      return () => window.clearTimeout(id);
+    const unsubPref = subscribePhoneAlertsPrefChange(setPhoneAlertsEnabled);
+    const unsubPerm = subscribeNotificationPermissionSync(setNotificationPerm);
+    return () => {
+      unsubPref();
+      unsubPerm();
+    };
+  }, []);
+
+  const isNewsBlocked = newsProtection?.blocked === true;
+
+  // Never let a previously generated BUY/SELL report stay displayed as current when news-block engages
+  useEffect(() => {
+    if (isNewsBlocked) {
+      setActiveReport(null);
+      setAnalyzing(false);
     }
-  }, [quote?.mid, quote?.freshness]);
+  }, [isNewsBlocked]);
+
+  const handleTogglePhoneAlerts = useCallback(async () => {
+    if (phoneAlertsEnabled) {
+      setPhoneAlertsEnabledPref(false);
+      setPhoneAlertsEnabled(false);
+      setAlertFeedback(null);
+      return;
+    }
+    const result = await enableAndTestPhoneAlerts();
+    setPhoneAlertsEnabled(result.alertsEnabled);
+    setNotificationPerm(result.permissionState);
+    setAlertFeedback(result.message);
+  }, [phoneAlertsEnabled]);
+
+  const handleTestPhoneAlert = useCallback(async () => {
+    setTestingAlert(true);
+    try {
+      const result = await sendTestPhoneNotification();
+      setNotificationPerm(result.permissionState);
+      setAlertFeedback(result.message);
+    } finally {
+      setTestingAlert(false);
+    }
+  }, []);
+
+  const rawDisplayPrice =
+    quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
+      ? quote.mid
+      : dataset?.candles?.[dataset.candles.length - 1]?.close ?? null;
 
   const loadChartData = useCallback(async (tf: Timeframe, showSpinner = false) => {
     if (showSpinner) setChartLoading(true);
@@ -177,7 +250,7 @@ export function TradeView({
     };
   }, [indicators, activeChartTimeframe]);
 
-  const handleToggleAnalysisTimeframe = (tf: Timeframe) => {
+  const handleToggleAnalysisTimeframe = useCallback((tf: Timeframe) => {
     setSelectedTimeframes((prev) => {
       if (prev.includes(tf)) {
         if (prev.length === 1) return prev; // Keep at least 1 timeframe selected
@@ -185,34 +258,69 @@ export function TradeView({
       }
       return [...prev, tf];
     });
-  };
+  }, []);
 
-  const handleToggleIndicator = (id: IndicatorId) => {
+  const handleToggleIndicator = useCallback((id: IndicatorId) => {
     setIndicators((prev) =>
       prev.map((item) => (item.id === id ? { ...item, enabled: !item.enabled } : item))
     );
-  };
+  }, []);
 
-  const handleUpdateParam = (id: IndicatorId, key: string, value: number) => {
+  const handleUpdateParam = useCallback((id: IndicatorId, key: string, value: number) => {
     setIndicators((prev) =>
       prev.map((item) =>
         item.id === id ? { ...item, params: { ...item.params, [key]: value } } : item
       )
     );
-  };
+  }, []);
 
-  const handleBulkCategoryToggle = (category: IndicatorCategory, enable: boolean) => {
+  const handleResetIndicatorDefaults = useCallback(() => {
+    setIndicators(createDefaultIndicators());
+  }, []);
+
+  const handleBulkCategoryToggle = useCallback((category: IndicatorCategory, enable: boolean) => {
     const ids = new Set(INDICATOR_CATALOG.filter((d) => d.category === category).map((d) => d.id));
     setIndicators((prev) =>
       prev.map((item) => (ids.has(item.id) ? { ...item, enabled: enable } : item))
     );
-  };
+  }, []);
 
-  const handleEnableAllIndicators = () => {
+  const handleEnableAllIndicators = useCallback(() => {
     setIndicators((prev) => prev.map((item) => ({ ...item, enabled: true })));
-  };
+  }, []);
+
+  const handleApplyAutoPreset = useCallback(() => {
+    setSelectedTimeframes([...AUTO_PERFECT_TIMEFRAMES]);
+    setIndicators(createAutoPerfectIndicators());
+    setActiveChartTimeframe('15m');
+  }, []);
+
+  const handleSelectChartTimeframe = useCallback((tf: Timeframe) => {
+    setActiveChartTimeframe(tf);
+    setSelectedTimeframes((prev) => (prev.includes(tf) ? prev : [...prev, tf]));
+  }, []);
+
+  const handleRefreshAll = useCallback(() => {
+    onRefreshQuote();
+    loadChartData(activeChartTimeframe, false);
+    loadSentiment();
+  }, [onRefreshQuote, loadChartData, activeChartTimeframe, loadSentiment]);
+
+  const handleRefreshChartSpinner = useCallback(() => {
+    loadChartData(activeChartTimeframe, true);
+  }, [loadChartData, activeChartTimeframe]);
+
+  const handleCandleRollover = useCallback(() => {
+    loadChartData(activeChartTimeframe, false);
+  }, [loadChartData, activeChartTimeframe]);
+
+  const handleRefreshLeader = useCallback(() => {
+    onRefreshQuote();
+    loadChartData(activeChartTimeframe, true);
+  }, [onRefreshQuote, loadChartData, activeChartTimeframe]);
 
   const handleRunAnalysis = async () => {
+    if (isNewsBlocked) return;
     const enabledCount = indicators.filter((i) => i.enabled).length;
     if (enabledCount === 0 || selectedTimeframes.length === 0) return;
 
@@ -239,6 +347,12 @@ export function TradeView({
 
       const json = await res.json().catch(() => ({}));
       stageTimers.forEach((id) => clearTimeout(id));
+
+      if (res.status === 423 && json.newsProtection) {
+        onNewsProtectionSync?.(json.newsProtection as NewsProtectionState);
+        setAnalyzing(false);
+        return;
+      }
 
       if (!res.ok || !json.report) {
         setAnalysisErrStatus(json.status || 'DATA UNAVAILABLE');
@@ -268,6 +382,66 @@ export function TradeView({
     }
   };
 
+  const enabledIndicatorCount = useMemo(
+    () => indicators.filter((i) => i.enabled).length,
+    [indicators]
+  );
+  const isAutoPresetActive = useMemo(
+    () => isAutoPerfectPresetSelected(selectedTimeframes, indicators),
+    [selectedTimeframes, indicators]
+  );
+  const showVolumeOnChart = useMemo(
+    () => indicators.some((i) => i.id === 'volume' && i.enabled),
+    [indicators]
+  );
+  const chartCandles = useMemo(
+    () => dataset?.candles ?? EMPTY_CANDLES,
+    [dataset?.candles]
+  );
+  const freshnessLabel =
+    quote && quote.freshness !== 'UNAVAILABLE'
+      ? quote.freshness
+      : dataset?.freshness ?? 'UNAVAILABLE';
+  const latestDataTs = quote?.freshness !== 'UNAVAILABLE' && quote?.timestamp
+    ? quote.timestamp
+    : dataset?.latestTimestamp ?? null;
+  const formattedUpdatedTime = useMemo(() => {
+    if (!latestDataTs) return null;
+    return new Date(latestDataTs).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }, [latestDataTs]);
+
+  const savedHistoryItems = useMemo(
+    () =>
+      reports.map((report) => ({
+        report,
+        dt: new Date(report.createdAt).toLocaleString([], {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        confidence: getReportSignalConfidence(report),
+      })),
+    [reports]
+  );
+
+  const handleDeleteSavedReport = useCallback(
+    async (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      setDeletingReportId(id);
+      try {
+        await onDeleteReport(id);
+      } finally {
+        setDeletingReportId(null);
+      }
+    },
+    [onDeleteReport]
+  );
+
   if (activeReport) {
     return (
       <AnalysisResultView
@@ -277,20 +451,6 @@ export function TradeView({
       />
     );
   }
-
-  const enabledIndicatorCount = indicators.filter((i) => i.enabled).length;
-  const showVolumeOnChart = indicators.some((i) => i.id === 'volume' && i.enabled);
-  const displayPrice =
-    quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
-      ? quote.mid
-      : dataset?.candles?.[dataset.candles.length - 1]?.close ?? null;
-  const freshnessLabel =
-    quote && quote.freshness !== 'UNAVAILABLE'
-      ? quote.freshness
-      : dataset?.freshness ?? 'UNAVAILABLE';
-  const latestDataTs = quote?.freshness !== 'UNAVAILABLE' && quote?.timestamp
-    ? quote.timestamp
-    : dataset?.latestTimestamp ?? null;
 
   return (
     <div className="space-y-4 pb-6">
@@ -319,19 +479,14 @@ export function TradeView({
               </span>
             </div>
 
-            {displayPrice != null ? (
+            {rawDisplayPrice != null ? (
               <div className="flex items-baseline gap-3">
-                <span
-                  className={`text-3xl sm:text-4xl font-mono font-bold tabular-nums tracking-tight transition-colors duration-200 ${
-                    priceFlash === 'up'
-                      ? 'text-emerald-400'
-                      : priceFlash === 'down'
-                      ? 'text-red-400'
-                      : 'text-zinc-100'
-                  }`}
-                >
-                  ${displayPrice.toFixed(2)}
-                </span>
+                <SmoothedPriceText
+                  value={rawDisplayPrice}
+                  enabled={!activeReport}
+                  flashOnMove
+                  className="text-3xl sm:text-4xl font-mono font-bold tabular-nums tracking-tight transition-colors duration-200"
+                />
                 {quote?.changeAbs != null && quote?.changePct != null && (
                   <span
                     className={`text-xs font-mono font-semibold tabular-nums ${
@@ -362,21 +517,13 @@ export function TradeView({
             )}
             <div className="flex items-center gap-2">
               <span>
-                {latestDataTs
-                  ? `Updated ${new Date(latestDataTs).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                    })}`
+                {formattedUpdatedTime
+                  ? `Updated ${formattedUpdatedTime}`
                   : quoteError || 'Awaiting feed'}
               </span>
               <button
                 type="button"
-                onClick={() => {
-                  onRefreshQuote();
-                  loadChartData(activeChartTimeframe, false);
-                  loadSentiment();
-                }}
+                onClick={handleRefreshAll}
                 aria-label="Refresh quote"
                 className="p-1.5 rounded-lg text-zinc-400 hover:text-[#F5D061] hover:bg-white/5 transition-colors"
               >
@@ -393,6 +540,39 @@ export function TradeView({
           </div>
         )}
       </section>
+
+      {/* High-Impact USD News Warning Box (positioned between Live Price & LEADER Section) */}
+      {newsProtection && newsProtection.warningActive && (
+        <section
+          role="alert"
+          aria-label="High Impact News Warning"
+          className="rounded-2xl border border-red-500/80 bg-gradient-to-r from-[#280B0F] via-[#1C0A0E] to-[#280B0F] px-4 py-3.5 shadow-[0_0_26px_-4px_rgba(239,68,68,0.68)] space-y-1.5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+              <span className="text-sm sm:text-base font-display font-bold tracking-wider text-red-400 drop-shadow-[0_0_10px_rgba(248,113,113,0.7)]">
+                {newsProtection.safeFallbackActive
+                  ? 'NEWS DATA UNVERIFIED — TRADING PAUSED'
+                  : newsProtection.blocked
+                  ? 'HIGH IMPACT NEWS — TRADING PAUSED'
+                  : 'HIGH IMPACT NEWS COMING'}
+              </span>
+            </div>
+            {(newsProtection.activeEvent || newsProtection.upcomingEvent) && (
+              <span className="text-[11px] font-mono font-bold text-red-300 tabular-nums">
+                {(newsProtection.activeEvent ?? newsProtection.upcomingEvent)!.istTimeLabel} IST
+                {newsProtection.minutesToEvent != null && !newsProtection.blocked
+                  ? ` · in ${newsProtection.minutesToEvent}m`
+                  : ''}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-red-100/90 leading-relaxed">
+            {newsProtection.subtext}
+          </p>
+        </section>
+      )}
 
       {/* Responsive 2-Column Workstation on Desktop, Vertical Thumb Flow on Mobile */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
@@ -430,61 +610,334 @@ export function TradeView({
             indicators={indicators}
             onToggleIndicator={handleToggleIndicator}
             onUpdateParam={handleUpdateParam}
-            onResetDefaults={() => setIndicators(createDefaultIndicators())}
+            onResetDefaults={handleResetIndicatorDefaults}
             onBulkCategoryToggle={handleBulkCategoryToggle}
             onEnableAllIndicators={handleEnableAllIndicators}
           />
 
-          {/* Main Analysis Control Panel */}
-          <section
-            aria-label="Analysis Control Panel"
-            className="rounded-2xl border border-[#D4AF37]/25 bg-[#121318] p-4 space-y-3.5"
-          >
-            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/8">
-              <div>
-                <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-[#F5D061]">
-                  Analysis Control Panel
+          {/* Main Analysis Control Panel (Replaced by HIGH IMPACT NEWS block during news lock) */}
+          {isNewsBlocked ? (
+            <section
+              role="status"
+              aria-label="Analysis Paused For High Impact News"
+              className="rounded-2xl border border-red-500/80 bg-[#1B0B0F] p-5 shadow-[0_0_24px_-6px_rgba(239,68,68,0.65)] text-center space-y-3"
+            >
+              <div className="mx-auto w-11 h-11 rounded-2xl bg-red-500/15 border border-red-500/50 flex items-center justify-center text-red-400">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div className="text-2xl font-display font-bold tracking-wider text-red-500 drop-shadow-[0_0_12px_rgba(239,68,68,0.65)]">
+                HIGH IMPACT NEWS
+              </div>
+              {newsProtection?.safeFallbackActive && (
+                <div className="text-[11px] font-mono font-bold text-amber-300 uppercase tracking-wider">
+                  News Data Unavailable / Unverified — Safe Fallback Active
                 </div>
-                <h2 className="text-sm font-display font-semibold text-zinc-100 mt-0.5">
-                  Scope & Execution
-                </h2>
-              </div>
-              <div className="text-[11px] font-mono tabular-nums text-zinc-400">
-                {selectedTimeframes.length} TF × {enabledIndicatorCount} Ind
-              </div>
-            </div>
-
-            <TimeframeSelector
-              embedded
-              mode="analysis-only"
-              activeChartTimeframe={activeChartTimeframe}
-              selectedTimeframes={selectedTimeframes}
-              onSelectChartTimeframe={(tf) => {
-                setActiveChartTimeframe(tf);
-                setSelectedTimeframes((prev) => (prev.includes(tf) ? prev : [...prev, tf]));
-              }}
-              onToggleAnalysisTimeframe={handleToggleAnalysisTimeframe}
-              onSetPresetTimeframes={setSelectedTimeframes}
-            />
-
-            {/* Prominent Gold Execute Button */}
-            <div className="pt-2.5 border-t border-white/8 space-y-2">
-              <button
-                type="button"
-                onClick={handleRunAnalysis}
-                disabled={analyzing || enabledIndicatorCount === 0 || selectedTimeframes.length === 0}
-                className="w-full min-h-[54px] px-6 py-3.5 rounded-2xl bg-gradient-to-r from-[#F5D061] via-[#D4AF37] to-[#C29724] text-[#09090B] font-display font-bold text-sm tracking-wide inline-flex items-center justify-center gap-2.5 shadow-lg shadow-[#D4AF37]/15 hover:brightness-105 active:scale-[0.99] transition-all disabled:opacity-45 disabled:pointer-events-none"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>ANALYSE XAUUSD</span>
-              </button>
-              <p className="text-[11px] text-center font-mono tabular-nums text-zinc-500">
-                Processes {selectedTimeframes.length} timeframe(s) × {enabledIndicatorCount} indicator(s)
+              )}
+              <p className="text-xs text-red-100/90 leading-relaxed">
+                {newsProtection?.subtext ||
+                  'High-impact USD news protection active. Normal XAUUSD analysis and BUY/SELL entry signals are paused until market volatility and data stabilize.'}
               </p>
+              {newsProtection?.activeEvent && (
+                <div className="rounded-xl bg-[#12080B] border border-red-500/30 px-3 py-2 text-[11px] font-mono text-red-200 space-y-0.5">
+                  <div className="font-bold text-red-300">{newsProtection.activeEvent.title}</div>
+                  <div>
+                    USD · RED HIGH IMPACT · {newsProtection.activeEvent.istTimeLabel} IST
+                  </div>
+                </div>
+              )}
+              <div className="text-[11px] font-mono text-zinc-400 pt-1">
+                {newsProtection?.marketStability.volatilityDetail}
+              </div>
+            </section>
+          ) : (
+            <section
+              aria-label="Analysis Control Panel"
+              className="rounded-2xl border border-[#D4AF37]/25 bg-[#121318] p-4 space-y-3.5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/8">
+                <div>
+                  <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-[#F5D061]">
+                    Analysis Control Panel
+                  </div>
+                  <h2 className="text-sm font-display font-semibold text-zinc-100 mt-0.5">
+                    Scope & Execution
+                  </h2>
+                </div>
+                <div className="flex items-center gap-2.5 ml-auto">
+                  <div className="text-[11px] font-mono tabular-nums text-zinc-400">
+                    {selectedTimeframes.length} TF × {enabledIndicatorCount} Ind
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleApplyAutoPreset}
+                    aria-pressed={isAutoPresetActive}
+                    title="Auto-select 1m, 5m, 15m, 1H + all 11 core technical indicators"
+                    className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap border ${
+                      isAutoPresetActive
+                        ? 'bg-emerald-500/15 border-emerald-500/45 text-emerald-400'
+                        : 'bg-[#181A20] border-[#D4AF37]/45 text-[#F5D061] hover:bg-[#D4AF37]/15'
+                    }`}
+                  >
+                    {isAutoPresetActive ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : (
+                      <Wand2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>Auto</span>
+                  </button>
+                </div>
+              </div>
+
+              <TimeframeSelector
+                embedded
+                mode="analysis-only"
+                activeChartTimeframe={activeChartTimeframe}
+                selectedTimeframes={selectedTimeframes}
+                onSelectChartTimeframe={handleSelectChartTimeframe}
+                onToggleAnalysisTimeframe={handleToggleAnalysisTimeframe}
+                onSetPresetTimeframes={setSelectedTimeframes}
+              />
+
+              {/* Prominent Gold Execute Button */}
+              <div className="pt-2.5 border-t border-white/8 space-y-2">
+                <button
+                  type="button"
+                  onClick={handleRunAnalysis}
+                  disabled={analyzing || enabledIndicatorCount === 0 || selectedTimeframes.length === 0}
+                  className="w-full min-h-[54px] px-6 py-3.5 rounded-2xl bg-gradient-to-r from-[#F5D061] via-[#D4AF37] to-[#C29724] text-[#09090B] font-display font-bold text-sm tracking-wide inline-flex items-center justify-center gap-2.5 shadow-lg shadow-[#D4AF37]/15 hover:brightness-105 active:scale-[0.99] transition-all disabled:opacity-45 disabled:pointer-events-none"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>ANALYSE XAUUSD</span>
+                </button>
+                <p className="text-[11px] text-center font-mono tabular-nums text-zinc-500">
+                  Processes {selectedTimeframes.length} timeframe(s) × {enabledIndicatorCount} indicator(s)
+                </p>
+              </div>
+            </section>
+          )}
+
+          {/* Alert Settings */}
+          <section
+            aria-label="Phone Alert Settings"
+            className="rounded-2xl border border-white/10 bg-[#121318] px-4 py-3 space-y-2.5"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
+                    phoneAlertsEnabled && notificationPerm === 'granted'
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                      : phoneAlertsEnabled
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                      : 'bg-[#181A20] border-white/10 text-zinc-400'
+                  }`}
+                >
+                  {phoneAlertsEnabled ? (
+                    <Bell className="w-4 h-4" />
+                  ) : (
+                    <BellOff className="w-4 h-4" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-zinc-100">Enable Phone Alerts</div>
+                  <div className="text-[11px] font-mono text-zinc-400 truncate">
+                    {!phoneAlertsEnabled
+                      ? 'OFF · Tap to enable signal alerts'
+                      : notificationPerm === 'granted'
+                      ? 'ON · Push, Sound & Vibration active'
+                      : notificationPerm === 'denied'
+                      ? 'Sound ON · OS Push blocked in site settings'
+                      : notificationPerm === 'unsupported'
+                      ? 'Sound ON · Install app for OS push alerts'
+                      : 'Sound ON · Tap Test to allow OS push popups'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {phoneAlertsEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => void handleTestPhoneAlert()}
+                    disabled={testingAlert}
+                    className="min-h-[30px] px-2.5 rounded-lg bg-[#181A20] border border-[#D4AF37]/40 text-[11px] font-mono font-semibold text-[#F5D061] hover:bg-[#D4AF37]/15 transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {testingAlert ? 'Testing...' : notificationPerm === 'default' ? 'Allow' : 'Test'}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={phoneAlertsEnabled}
+                  aria-label="Enable Phone Alerts"
+                  onClick={handleTogglePhoneAlerts}
+                  className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors ${
+                    phoneAlertsEnabled
+                      ? notificationPerm === 'granted'
+                        ? 'bg-emerald-500 border-emerald-400'
+                        : 'bg-amber-500 border-amber-400'
+                      : 'bg-[#181A20] border-white/15'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                      phoneAlertsEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
             </div>
+
+            {(alertFeedback || (phoneAlertsEnabled && notificationPerm === 'denied')) && (
+              <div
+                className={`rounded-xl border px-3 py-2 text-[11px] leading-relaxed ${
+                  notificationPerm === 'granted'
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                    : 'border-amber-500/35 bg-amber-500/10 text-amber-200'
+                }`}
+              >
+                {alertFeedback ||
+                  'Browser notifications are blocked for this site. Tap the lock/settings icon in your browser address bar and allow Notifications.'}
+              </div>
+            )}
           </section>
         </div>
       </div>
+
+      {/* Saved ANALYSE XAUUSD Result History Option (Tap to expand history inside) */}
+      <section aria-label="Saved Analysis History" className="rounded-2xl border border-white/10 bg-[#121318] overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowAnalysisHistory((prev) => !prev)}
+          aria-expanded={showAnalysisHistory}
+          className="w-full px-4 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-white/[0.03] transition-colors cursor-pointer"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-[#D4AF37]/12 border border-[#D4AF37]/35 flex items-center justify-center text-[#F5D061] shrink-0">
+              <FileText className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs sm:text-sm font-display font-semibold text-zinc-100 truncate">
+                  Saved XAUUSD Analysis History
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-[#181A20] border border-[#D4AF37]/30 text-[11px] font-mono font-bold text-[#F5D061] tabular-nums shrink-0">
+                  {reports.length}
+                </span>
+              </div>
+              <div className="text-[11px] font-mono text-zinc-400 truncate">
+                {showAnalysisHistory
+                  ? 'Tap any saved result below · Tap header to close'
+                  : reports.length > 0
+                  ? `Latest: ${reports[0].strategyEvaluation?.action ?? reports[0].classification} · $${reports[0].spotPrice.toFixed(2)} · Tap to open history`
+                  : 'Tap to open saved XAUUSD analysis history'}
+              </div>
+            </div>
+          </div>
+
+          <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#181A20] border border-white/10 text-xs font-semibold text-[#F5D061] shrink-0">
+            <span>{showAnalysisHistory ? 'Hide' : 'Open'}</span>
+            {showAnalysisHistory ? (
+              <ChevronUp className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5" />
+            )}
+          </div>
+        </button>
+
+        {showAnalysisHistory && (
+          <div className="px-4 pb-4 pt-2 border-t border-white/8 space-y-2.5">
+            {reportsLoading && savedHistoryItems.length === 0 ? (
+              <div className="h-16 rounded-xl border border-white/8 bg-[#0D0E12] animate-pulse" />
+            ) : savedHistoryItems.length === 0 ? (
+              <div className="rounded-xl border border-white/8 bg-[#0D0E12] p-4 text-center text-xs text-zinc-400">
+                No saved analysis results yet. Tap <span className="text-[#F5D061] font-semibold">ANALYSE XAUUSD</span> above — every generated result stays saved here automatically.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-[360px] overflow-y-auto pr-0.5">
+                {savedHistoryItems.map(({ report, dt, confidence }, idx) => {
+                  const classColor =
+                    report.classification === 'BUY'
+                      ? 'text-emerald-400'
+                      : report.classification === 'SELL'
+                      ? 'text-red-400'
+                      : 'text-[#F5D061]';
+                  const Icon =
+                    report.classification === 'BUY'
+                      ? TrendingUp
+                      : report.classification === 'SELL'
+                      ? TrendingDown
+                      : Minus;
+
+                  return (
+                    <div
+                      key={report.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setActiveReport(report)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setActiveReport(report);
+                        }
+                      }}
+                      className="rounded-xl border border-white/10 bg-[#0D0E12] hover:border-[#D4AF37]/45 px-3.5 py-2.5 flex items-center justify-between gap-3 cursor-pointer transition-colors"
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          <span className={`inline-flex items-center gap-1 text-xs sm:text-sm font-display font-bold ${classColor}`}>
+                            <Icon className="w-3.5 h-3.5" />
+                            <span>{report.strategyEvaluation?.action ?? report.classification}</span>
+                          </span>
+                          {idx === 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-[#D4AF37]/15 border border-[#D4AF37]/40 text-[10px] font-mono font-bold text-[#F5D061]">
+                              LATEST
+                            </span>
+                          )}
+                          {report.strategyEvaluation && (
+                            <span className="text-[11px] font-mono tabular-nums text-[#F5D061]">
+                              · {report.strategyEvaluation.totalScore}/100
+                            </span>
+                          )}
+                          <span className="text-[11px] font-mono tabular-nums text-zinc-200">
+                            · {confidence.scorePct}% conf
+                          </span>
+                          <span className="text-[11px] font-mono tabular-nums text-zinc-200">
+                            · ${report.spotPrice.toFixed(2)}
+                          </span>
+                          <span className="text-[11px] font-mono text-zinc-400">· {dt}</span>
+                        </div>
+                        <div className="text-[11px] font-mono text-zinc-400 truncate">
+                          {report.selectedTimeframes.join(', ')} · {report.freshness}
+                          {report.tradeLevels && (
+                            <span className="text-zinc-300">
+                              {' '}· SL ${report.tradeLevels.stopLoss.toFixed(2)} · TP ${report.tradeLevels.takeProfit1.toFixed(2)} ({report.tradeLevels.rewardRiskRatio1})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => void handleDeleteSavedReport(e, report.id)}
+                          disabled={deletingReportId === report.id}
+                          aria-label="Delete saved analysis"
+                          className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                        <ChevronRight className="w-4 h-4 text-zinc-500" />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
 
       {/* Show / Hide Chart Option positioned below ANALYSE XAUUSD at the bottom */}
       <section className="space-y-4">
@@ -518,7 +971,7 @@ export function TradeView({
 
         {showChart && (
           <XauUsdChart
-            candles={dataset?.candles ?? []}
+            candles={chartCandles}
             overlays={overlays}
             timeframe={activeChartTimeframe}
             supportLevels={supportLevels}
@@ -527,8 +980,8 @@ export function TradeView({
             hasExchangeVolume={dataset?.hasExchangeVolume ?? true}
             loading={chartLoading}
             error={chartError}
-            onRefresh={() => loadChartData(activeChartTimeframe, true)}
-            onCandleRollover={() => loadChartData(activeChartTimeframe, false)}
+            onRefresh={handleRefreshChartSpinner}
+            onCandleRollover={handleCandleRollover}
             liveQuote={quote}
           />
         )}
@@ -538,10 +991,7 @@ export function TradeView({
           mode="chart-only"
           activeChartTimeframe={activeChartTimeframe}
           selectedTimeframes={selectedTimeframes}
-          onSelectChartTimeframe={(tf) => {
-            setActiveChartTimeframe(tf);
-            setSelectedTimeframes((prev) => (prev.includes(tf) ? prev : [...prev, tf]));
-          }}
+          onSelectChartTimeframe={handleSelectChartTimeframe}
           onToggleAnalysisTimeframe={handleToggleAnalysisTimeframe}
           onSetPresetTimeframes={setSelectedTimeframes}
         />
@@ -563,19 +1013,16 @@ export function TradeView({
         <LeaderChartFullView
           quote={quote}
           quoteError={quoteError}
-          candles={dataset?.candles ?? []}
+          candles={chartCandles}
           timeframe={activeChartTimeframe}
           loading={chartLoading}
           error={chartError}
-          onChangeTimeframe={(tf) => setActiveChartTimeframe(tf)}
-          onRefresh={() => {
-            onRefreshQuote();
-            loadChartData(activeChartTimeframe, true);
-          }}
-          onCandleRollover={() => loadChartData(activeChartTimeframe, false)}
+          onChangeTimeframe={setActiveChartTimeframe}
+          onRefresh={handleRefreshLeader}
+          onCandleRollover={handleCandleRollover}
           onClose={() => setLeaderViewOpen(false)}
         />
       )}
     </div>
   );
-}
+});

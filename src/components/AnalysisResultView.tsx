@@ -7,6 +7,10 @@ import {
   triggerJpgDownload,
   type RenderedJpgReport,
 } from '../utils/exportReportJpg.ts';
+import {
+  computeTimeframeConfidencePct,
+  getReportSignalConfidence,
+} from '../utils/signalConfidence.ts';
 import { JpgPreviewModal } from './JpgPreviewModal.tsx';
 import { TradeLevelsScale } from './TradeLevelsScale.tsx';
 
@@ -76,6 +80,23 @@ export function AnalysisResultView({
 
   const style = getClassificationStyle(report.classification);
   const ClassIcon = style.Icon;
+  const confidence = getReportSignalConfidence(report);
+  const confidenceBarColor =
+    report.classification === 'BUY'
+      ? 'bg-emerald-400'
+      : report.classification === 'SELL'
+      ? 'bg-red-400'
+      : 'bg-[#F5D061]';
+  const confidenceTextColor =
+    confidence.tier === 'HIGH'
+      ? 'text-emerald-400'
+      : confidence.tier === 'MODERATE'
+      ? 'text-[#F5D061]'
+      : 'text-zinc-300';
+  const totalVotesSafe = Math.max(1, confidence.totalVotes);
+  const buyPct = Math.round((confidence.buyVotes / totalVotesSafe) * 100);
+  const holdPct = Math.round((confidence.holdVotes / totalVotesSafe) * 100);
+  const sellPct = Math.max(0, 100 - buyPct - holdPct);
 
   const formattedReportDate = new Date(report.createdAt).toLocaleString([], {
     year: 'numeric',
@@ -94,6 +115,24 @@ export function AnalysisResultView({
     minute: '2-digit',
     second: '2-digit',
   });
+
+  const strat = report.strategyEvaluation;
+  const displayAction = strat?.action ?? report.classification;
+  const actionStyle =
+    displayAction === 'BUY'
+      ? getClassificationStyle('BUY')
+      : displayAction === 'SELL'
+      ? getClassificationStyle('SELL')
+      : getClassificationStyle('HOLD');
+  const ActionIcon = actionStyle.Icon;
+
+  const formattedValidUntil = strat?.validUntil
+    ? new Date(strat.validUntil).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : null;
 
   return (
     <motion.div
@@ -115,7 +154,8 @@ export function AnalysisResultView({
 
         <div className="flex flex-wrap items-center gap-2.5 ml-auto">
           <div className="text-right text-[11px] font-mono text-zinc-400 hidden sm:block">
-            <div>Saved {formattedReportDate}</div>
+            <div>Generated {formattedReportDate}</div>
+            {formattedValidUntil && <div>Valid until {formattedValidUntil}</div>}
           </div>
           <button
             type="button"
@@ -141,32 +181,110 @@ export function AnalysisResultView({
       )}
 
       {/* Primary Classification Card */}
-      <section className={`rounded-2xl border ${style.border} ${style.bg} p-5 space-y-4`}>
+      <section className={`rounded-2xl border ${actionStyle.border} ${actionStyle.bg} p-5 space-y-4`}>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-1.5">
             <div className="text-xs font-mono text-zinc-400">
-              XAU/USD Market Classification · {report.freshness} Data
+              XAU/USD Strict Multi-Timeframe Analysis · {report.freshness} Data
+              {strat ? ` · Overall Direction: ${strat.overallDirection}` : ''}
             </div>
-            <div className="flex items-center gap-3">
-              <ClassIcon className={`w-8 h-8 ${style.text}`} />
-              <h1 className={`text-3xl sm:text-4xl font-display font-bold tracking-tight ${style.text}`}>
-                {report.classification}
+            <div className="flex flex-wrap items-center gap-3">
+              <ActionIcon className={`w-8 h-8 ${actionStyle.text}`} />
+              <h1 className={`text-3xl sm:text-4xl font-display font-bold tracking-tight ${actionStyle.text}`}>
+                {displayAction}
               </h1>
+              {strat && (
+                <span className="px-2.5 py-1 rounded-lg border border-white/15 bg-[#0D0E12]/90 text-xs font-mono font-bold text-[#F5D061]">
+                  {strat.totalScore}/100 · {strat.scoreCategory}
+                </span>
+              )}
             </div>
-            <p className="text-sm text-zinc-200 max-w-xl">{style.meaning}</p>
+            <p className="text-sm text-zinc-200 max-w-xl">
+              {displayAction === 'BUY' || displayAction === 'SELL'
+                ? actionStyle.meaning
+                : displayAction === 'WAIT'
+                ? 'Partial alignment detected, but mandatory strict timeframe or setup gates are still pending.'
+                : 'Mandatory strict multi-timeframe conditions are not satisfied or market data checks blocked execution.'}
+            </p>
           </div>
 
           <div className="text-left sm:text-right font-mono tabular-nums space-y-1">
-            <div className="text-xs text-zinc-400">Spot Reference</div>
+            <div className="text-xs text-zinc-400">Current XAUUSD Price</div>
             <div className="text-2xl font-bold text-zinc-100">${report.spotPrice.toFixed(2)}</div>
             <div className="text-[11px] text-zinc-400">
               Bid ${report.spotBid.toFixed(2)} · Ask ${report.spotAsk.toFixed(2)}
             </div>
             <div className="text-[11px] text-zinc-400">
-              Composite Score {report.combinedScore >= 0 ? '+' : ''}
-              {report.combinedScore.toFixed(3)}
+              {formattedValidUntil
+                ? `Valid until ${formattedValidUntil}`
+                : `Composite Score ${report.combinedScore >= 0 ? '+' : ''}${report.combinedScore.toFixed(3)}`}
             </div>
           </div>
+        </div>
+
+        {/* Signal Confidence & Multi-Timeframe Indicator Agreement Meter */}
+        <div className="rounded-xl border border-white/10 bg-[#0D0E12]/90 p-3.5 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-zinc-200">Signal Confidence</span>
+              <span className={`text-[11px] font-mono font-bold ${confidenceTextColor}`}>
+                · {confidence.tier}
+              </span>
+            </div>
+            <div className="font-mono tabular-nums text-sm font-bold text-zinc-100">
+              <span className={style.text}>{confidence.scorePct}%</span>
+              <span className="text-[11px] font-normal text-zinc-400 ml-2">
+                ({confidence.alignedTimeframes}/{confidence.totalTimeframes} TF aligned)
+              </span>
+            </div>
+          </div>
+
+          {/* 0-100% Confidence Progress Track */}
+          <div className="h-2 w-full rounded bg-zinc-800 overflow-hidden">
+            <div
+              className={`h-full rounded transition-all duration-300 ${confidenceBarColor}`}
+              style={{ width: `${confidence.scorePct}%` }}
+            />
+          </div>
+
+          {/* Multi-Timeframe BUY / HOLD / SELL Indicator Vote Distribution */}
+          {confidence.totalVotes > 0 && (
+            <div className="space-y-1.5 pt-0.5">
+              <div className="flex h-1.5 w-full rounded overflow-hidden bg-zinc-800">
+                {confidence.buyVotes > 0 && (
+                  <div
+                    className="bg-emerald-500 h-full"
+                    style={{ width: `${(confidence.buyVotes / totalVotesSafe) * 100}%` }}
+                  />
+                )}
+                {confidence.holdVotes > 0 && (
+                  <div
+                    className="bg-[#D4AF37] h-full"
+                    style={{ width: `${(confidence.holdVotes / totalVotesSafe) * 100}%` }}
+                  />
+                )}
+                {confidence.sellVotes > 0 && (
+                  <div
+                    className="bg-red-500 h-full"
+                    style={{ width: `${(confidence.sellVotes / totalVotesSafe) * 100}%` }}
+                  />
+                )}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                <span className="text-emerald-400">
+                  BUY: {confidence.buyVotes}/{confidence.totalVotes} ({buyPct}%)
+                </span>
+                <span className="text-[#F5D061]">
+                  HOLD: {confidence.holdVotes}/{confidence.totalVotes} ({holdPct}%)
+                </span>
+                <span className="text-red-400">
+                  SELL: {confidence.sellVotes}/{confidence.totalVotes} ({sellPct}%)
+                </span>
+              </div>
+            </div>
+          )}
+
+          <p className="text-xs text-zinc-300 leading-relaxed">{confidence.summary}</p>
         </div>
 
         <div className="pt-3 border-t border-white/10 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-zinc-300">
@@ -188,25 +306,25 @@ export function AnalysisResultView({
         </p>
       </div>
 
-      {/* Calculated SL & TP Levels (for BUY / SELL) or HOLD Notice */}
+      {/* Calculated SL & Single TP Reference Levels (ONE Take Profit Only) */}
       {report.tradeLevels ? (
         <section className="rounded-2xl border border-[#D4AF37]/30 bg-[#121318] p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-display font-semibold text-[#F5D061]">
-              Calculated SL & TP Reference Levels ({report.classification})
+              Entry, Stop Loss & Single Take Profit ({displayAction})
             </h2>
             <span className="text-[11px] font-mono text-zinc-400">
-              {report.tradeLevels.referenceTimeframe} ATR(14): ${report.tradeLevels.atrValue.toFixed(2)} · Risk: ${report.tradeLevels.riskPoints.toFixed(2)}
+              {report.tradeLevels.referenceTimeframe} ATR(14): ${report.tradeLevels.atrValue.toFixed(2)} · Risk: ${report.tradeLevels.riskPoints.toFixed(2)} · R:R {report.tradeLevels.rewardRiskRatio1}
             </span>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono tabular-nums">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-mono tabular-nums">
             <div className="rounded-xl bg-[#0D0E12] border border-white/8 p-3 space-y-1">
-              <div className="text-[11px] text-zinc-400">Reference Spot</div>
+              <div className="text-[11px] text-zinc-400">Entry Price</div>
               <div className="text-base font-bold text-zinc-100">
                 ${report.tradeLevels.referencePrice.toFixed(2)}
               </div>
-              <div className="text-[10px] text-zinc-500">Market price at analysis</div>
+              <div className="text-[10px] text-zinc-500">Spot XAU/USD at generation</div>
             </div>
 
             <div className="rounded-xl bg-[#0D0E12] border border-red-500/30 p-3 space-y-1">
@@ -215,12 +333,12 @@ export function AnalysisResultView({
                 ${report.tradeLevels.stopLoss.toFixed(2)}
               </div>
               <div className="text-[10px] text-zinc-500">
-                -${report.tradeLevels.riskPoints.toFixed(2)} distance
+                -${report.tradeLevels.riskPoints.toFixed(2)} risk
               </div>
             </div>
 
             <div className="rounded-xl bg-[#0D0E12] border border-emerald-500/30 p-3 space-y-1">
-              <div className="text-[11px] text-emerald-400 font-semibold">Take Profit 1 (TP1)</div>
+              <div className="text-[11px] text-emerald-400 font-semibold">Take Profit (TP)</div>
               <div className="text-base font-bold text-emerald-400">
                 ${report.tradeLevels.takeProfit1.toFixed(2)}
               </div>
@@ -228,19 +346,9 @@ export function AnalysisResultView({
                 R:R {report.tradeLevels.rewardRiskRatio1}
               </div>
             </div>
-
-            <div className="rounded-xl bg-[#0D0E12] border border-emerald-500/30 p-3 space-y-1">
-              <div className="text-[11px] text-emerald-400 font-semibold">Take Profit 2 (TP2)</div>
-              <div className="text-base font-bold text-emerald-400">
-                ${report.tradeLevels.takeProfit2.toFixed(2)}
-              </div>
-              <div className="text-[10px] text-zinc-500">
-                R:R {report.tradeLevels.rewardRiskRatio2}
-              </div>
-            </div>
           </div>
 
-          <TradeLevelsScale classification={report.classification} levels={report.tradeLevels} />
+          <TradeLevelsScale classification={report.classification} levels={report.tradeLevels} singleTp />
 
           <p className="text-xs text-zinc-400 leading-relaxed">
             {report.tradeLevels.methodology}
@@ -249,11 +357,135 @@ export function AnalysisResultView({
       ) : (
         <section className="rounded-2xl border border-white/10 bg-[#121318] p-4 space-y-1.5">
           <h2 className="text-sm font-display font-semibold text-[#F5D061]">
-            SL & TP Reference Levels Withheld (HOLD)
+            Entry, SL & Single TP Withheld ({displayAction})
           </h2>
           <p className="text-xs text-zinc-400 leading-relaxed">
-            Directional Stop Loss (SL) and Take Profit (TP) targets are computed only when multi-timeframe consensus reaches BUY or SELL. Review the calculated Support & Resistance levels below for structural boundaries.
+            Trade execution levels are generated only when all mandatory multi-timeframe gates (1H trend, 15M BOS/CHoCH structure, 5M setup, and 1M closed-candle confirmation) pass together.
           </p>
+        </section>
+      )}
+
+      {/* 100-Point Setup Score + 1H / 15M / 5M / 1M Strict Multi-Timeframe Pipeline */}
+      {strat && (
+        <section className="rounded-2xl border border-[#D4AF37]/25 bg-[#121318] p-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-display font-semibold text-[#F5D061]">
+                Strict Multi-Timeframe Strategy & 100-Point Setup Score
+              </h2>
+              <p className="text-[11px] text-zinc-400">
+                Generated {formattedReportDate}{formattedValidUntil ? ` · Valid until ${formattedValidUntil}` : ''} · Score measures setup alignment quality, not guaranteed win probability.
+              </p>
+            </div>
+            <div className="font-mono text-sm font-bold text-zinc-100">
+              {strat.totalScore}/100 · <span className="text-[#F5D061]">{strat.scoreCategory}</span>
+            </div>
+          </div>
+
+          {/* 4-Timeframe Role Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+            <div className="rounded-xl bg-[#0D0E12] border border-white/8 p-3 space-y-1">
+              <div className="flex items-center justify-between font-mono font-semibold">
+                <span className="text-zinc-200">1H · Major Market Trend</span>
+                <span className={strat.trend1H.bias === 'BULLISH' ? 'text-emerald-400' : strat.trend1H.bias === 'BEARISH' ? 'text-red-400' : 'text-[#F5D061]'}>
+                  {strat.trend1H.bias}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">{strat.trend1H.summary}</p>
+              <div className="text-[10px] font-mono text-zinc-500">
+                EMA: {strat.trend1H.emaAlignment} · ST: {strat.trend1H.supertrendDir} · ADX: {strat.trend1H.adxValue ?? 'N/A'}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-[#0D0E12] border border-white/8 p-3 space-y-1">
+              <div className="flex items-center justify-between font-mono font-semibold">
+                <span className="text-zinc-200">15M · Market Structure</span>
+                <span className={strat.structure15M.agreesWith1H ? 'text-emerald-400' : 'text-amber-400'}>
+                  {strat.structure15M.direction} {strat.structure15M.agreesWith1H ? '✓' : '✕'}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">{strat.structure15M.summary}</p>
+              <div className="text-[10px] font-mono text-zinc-500">
+                BOS: {strat.structure15M.bosDetected} · CHoCH: {strat.structure15M.chochDetected} · High: {strat.structure15M.lastSwingHigh ?? 'N/A'} · Low: {strat.structure15M.lastSwingLow ?? 'N/A'}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-[#0D0E12] border border-white/8 p-3 space-y-1">
+              <div className="flex items-center justify-between font-mono font-semibold">
+                <span className="text-zinc-200">5M · Entry Setup</span>
+                <span className={strat.setup5M.setupComplete ? 'text-emerald-400' : 'text-amber-400'}>
+                  {strat.setup5M.setupComplete ? 'READY' : 'INCOMPLETE'}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">{strat.setup5M.summary}</p>
+              <div className="text-[10px] font-mono text-zinc-500">
+                Sweep: {strat.setup5M.liquiditySweep} · Retest: {strat.setup5M.retestConfirmed ? 'YES' : 'NO'} · ATR Vol: {strat.setup5M.volatilityRegime}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-[#0D0E12] border border-white/8 p-3 space-y-1">
+              <div className="flex items-center justify-between font-mono font-semibold">
+                <span className="text-zinc-200">1M · Final Closed Confirmation</span>
+                <span className={strat.confirmation1M.confirmed ? 'text-emerald-400' : 'text-amber-400'}>
+                  {strat.confirmation1M.direction}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">{strat.confirmation1M.summary}</p>
+              <div className="text-[10px] font-mono text-zinc-500">
+                Closed Candle: {strat.confirmation1M.closedCandleTime ? new Date(strat.confirmation1M.closedCandleTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'N/A'} · EMA:{strat.confirmation1M.emaAligned ? '✓' : '✕'} ST:{strat.confirmation1M.supertrendAligned ? '✓' : '✕'} DMI:{strat.confirmation1M.dmiAligned ? '✓' : '✕'}
+              </div>
+            </div>
+          </div>
+
+          {/* 7 Score Breakdown Bars */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+            {strat.scoreBreakdown.map((item) => (
+              <div key={item.category} className="rounded-xl bg-[#0D0E12] border border-white/6 p-2.5 space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono">
+                  <span className="text-zinc-300 truncate">{item.category}</span>
+                  <span className={item.passed ? 'text-emerald-400 font-bold' : 'text-zinc-300 font-bold'}>
+                    {item.score}/{item.maxScore}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded bg-zinc-800 overflow-hidden">
+                  <div
+                    className={`h-full rounded ${item.passed ? 'bg-emerald-400' : 'bg-[#D4AF37]'}`}
+                    style={{ width: `${Math.min(100, Math.round((item.score / Math.max(1, item.maxScore)) * 100))}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* All 11 Core Indicator Readings */}
+          {strat.all11Indicators.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-zinc-200">
+                All 11 Quantitative Indicators Snapshot (EMA &amp; SMA &amp; Supertrend deduplicated)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 text-[11px] font-mono">
+                {strat.all11Indicators.map((ind) => (
+                  <div key={ind.id} className="rounded-xl bg-[#0D0E12] border border-white/6 p-2.5 space-y-0.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-zinc-300 font-semibold truncate">{ind.name}</span>
+                      <span
+                        className={
+                          ind.bias === 'BUY'
+                            ? 'text-emerald-400 font-bold'
+                            : ind.bias === 'SELL'
+                            ? 'text-red-400 font-bold'
+                            : 'text-[#F5D061] font-bold'
+                        }
+                      >
+                        {ind.bias}
+                      </span>
+                    </div>
+                    <div className="text-zinc-100 tabular-nums truncate">{ind.primaryValue}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
       )}
 
@@ -431,6 +663,17 @@ export function AnalysisResultView({
           {report.timeframeAnalyses.map((tf) => {
             const isOpen = expandedTf === tf.timeframe;
             const tfStyle = getClassificationStyle(tf.classification);
+            const tfDirectional = tf.indicatorResults.filter(
+              (r) => r.id !== 'atr' && r.id !== 'bollinger_width'
+            );
+            const tfConfidence =
+              tf.confidencePct ??
+              computeTimeframeConfidencePct(
+                tf.classification,
+                tfDirectional.filter((r) => r.bias === 'BUY').length,
+                tfDirectional.filter((r) => r.bias === 'SELL').length,
+                tfDirectional.filter((r) => r.bias === 'HOLD').length
+              );
             return (
               <div
                 key={tf.timeframe}
@@ -442,10 +685,13 @@ export function AnalysisResultView({
                   className="w-full min-h-[56px] px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/5 transition-colors"
                 >
                   <div className="space-y-0.5 min-w-0">
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
                       <span className="text-sm font-mono font-bold text-zinc-100">{tf.timeframe}</span>
                       <span className={`text-xs font-mono font-bold ${tfStyle.text}`}>
                         {tf.classification}
+                      </span>
+                      <span className="text-[11px] font-mono text-zinc-300">
+                        · {tfConfidence}% confidence
                       </span>
                       <span className="text-[11px] font-mono text-zinc-400">
                         · Score {tf.combinedScore >= 0 ? '+' : ''}

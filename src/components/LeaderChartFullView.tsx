@@ -1,7 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo } from 'react';
 import { AlertCircle, X } from 'lucide-react';
-import { ALL_TIMEFRAMES, type Candle, type MarketQuote, type Timeframe } from '../types/market.ts';
+import {
+  ALL_TIMEFRAMES,
+  type Candle,
+  type ChartOverlaySeries,
+  type MarketQuote,
+  type Timeframe,
+} from '../types/market.ts';
+import { SmoothedPriceText } from './SmoothedPriceText.tsx';
 import { XauUsdChart } from './XauUsdChart.tsx';
+
+const EMPTY_OVERLAYS: ChartOverlaySeries[] = [];
+const EMPTY_LEVELS: number[] = [];
 
 interface LeaderChartFullViewProps {
   quote: MarketQuote | null;
@@ -16,7 +26,7 @@ interface LeaderChartFullViewProps {
   onClose: () => void;
 }
 
-export function LeaderChartFullView({
+export const LeaderChartFullView = memo(function LeaderChartFullView({
   quote,
   quoteError,
   candles,
@@ -28,22 +38,7 @@ export function LeaderChartFullView({
   onCandleRollover,
   onClose,
 }: LeaderChartFullViewProps) {
-  const lastPriceRef = useRef<number | null>(null);
-  const [priceFlash, setPriceFlash] = useState<'up' | 'down' | null>(null);
-
-  useEffect(() => {
-    const mid = quote?.freshness !== 'UNAVAILABLE' ? quote?.mid : undefined;
-    if (!mid || mid <= 0) return;
-    const prev = lastPriceRef.current;
-    lastPriceRef.current = mid;
-    if (prev !== null && mid !== prev) {
-      setPriceFlash(mid > prev ? 'up' : 'down');
-      const id = window.setTimeout(() => setPriceFlash(null), 450);
-      return () => window.clearTimeout(id);
-    }
-  }, [quote?.mid, quote?.freshness]);
-
-  const displayPrice =
+  const rawDisplayPrice =
     quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
       ? quote.mid
       : candles[candles.length - 1]?.close ?? null;
@@ -87,19 +82,13 @@ export function LeaderChartFullView({
               </span>
             </div>
 
-            {displayPrice != null ? (
+            {rawDisplayPrice != null ? (
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono tabular-nums">
-                <span
-                  className={`text-2xl sm:text-3xl font-bold transition-colors duration-200 ${
-                    priceFlash === 'up'
-                      ? 'text-emerald-400'
-                      : priceFlash === 'down'
-                      ? 'text-red-400'
-                      : 'text-zinc-100'
-                  }`}
-                >
-                  ${displayPrice.toFixed(2)}
-                </span>
+                <SmoothedPriceText
+                  value={rawDisplayPrice}
+                  flashOnMove
+                  className="text-2xl sm:text-3xl font-bold transition-colors duration-200"
+                />
                 {quote?.changeAbs != null && quote?.changePct != null && (
                   <span
                     className={`text-xs font-semibold ${
@@ -162,10 +151,10 @@ export function LeaderChartFullView({
       <div className="flex-1 min-h-0 flex flex-col">
         <XauUsdChart
           candles={candles}
-          overlays={[]}
+          overlays={EMPTY_OVERLAYS}
           timeframe={timeframe}
-          supportLevels={[]}
-          resistanceLevels={[]}
+          supportLevels={EMPTY_LEVELS}
+          resistanceLevels={EMPTY_LEVELS}
           showVolume={false}
           hasExchangeVolume={false}
           loading={loading}
@@ -178,4 +167,4 @@ export function LeaderChartFullView({
       </div>
     </div>
   );
-}
+});

@@ -10,7 +10,7 @@ import type {
   SignalClassification,
 } from '../src/types/market.ts';
 
-function smaArray(values: number[], period: number): Array<number | null> {
+export function smaArray(values: number[], period: number): Array<number | null> {
   const out: Array<number | null> = new Array(values.length).fill(null);
   if (period <= 0 || values.length < period) return out;
   let sum = 0;
@@ -22,7 +22,7 @@ function smaArray(values: number[], period: number): Array<number | null> {
   return out;
 }
 
-function emaArray(values: number[], period: number): Array<number | null> {
+export function emaArray(values: number[], period: number): Array<number | null> {
   const out: Array<number | null> = new Array(values.length).fill(null);
   if (period <= 0 || values.length < period) return out;
   let sum = 0;
@@ -82,7 +82,7 @@ function trueRangeArray(candles: Candle[]): number[] {
   return tr;
 }
 
-function atrArray(candles: Candle[], period: number): Array<number | null> {
+export function atrArray(candles: Candle[], period: number): Array<number | null> {
   const out: Array<number | null> = new Array(candles.length).fill(null);
   if (candles.length < period + 1) return out;
   const tr = trueRangeArray(candles);
@@ -97,7 +97,7 @@ function atrArray(candles: Candle[], period: number): Array<number | null> {
   return out;
 }
 
-function supertrendSeries(candles: Candle[], period: number, multiplier: number) {
+export function supertrendSeries(candles: Candle[], period: number, multiplier: number) {
   const atr = atrArray(candles, period);
   const line: Array<number | null> = new Array(candles.length).fill(null);
   const dir: Array<number> = new Array(candles.length).fill(0);
@@ -192,7 +192,7 @@ function psarSeries(candles: Candle[], step: number, maxStep: number): { sar: Ar
   return { sar, dir };
 }
 
-function rsiArray(closes: number[], period: number): Array<number | null> {
+export function rsiArray(closes: number[], period: number): Array<number | null> {
   const out: Array<number | null> = new Array(closes.length).fill(null);
   if (closes.length <= period) return out;
   let gainSum = 0;
@@ -217,7 +217,7 @@ function rsiArray(closes: number[], period: number): Array<number | null> {
   return out;
 }
 
-function dmiAdxSeries(candles: Candle[], period: number) {
+export function dmiAdxSeries(candles: Candle[], period: number) {
   const n = candles.length;
   const plusDI: Array<number | null> = new Array(n).fill(null);
   const minusDI: Array<number | null> = new Array(n).fill(null);
@@ -271,7 +271,7 @@ function dmiAdxSeries(candles: Candle[], period: number) {
   return { plusDI, minusDI, adx };
 }
 
-function bollingerArrays(closes: number[], period: number, stdDevMult: number) {
+export function bollingerArrays(closes: number[], period: number, stdDevMult: number) {
   const mid = smaArray(closes, period);
   const upper: Array<number | null> = new Array(closes.length).fill(null);
   const lower: Array<number | null> = new Array(closes.length).fill(null);
@@ -291,24 +291,67 @@ function bollingerArrays(closes: number[], period: number, stdDevMult: number) {
   return { upper, mid, lower };
 }
 
-function getEffectiveVolumes(candles: Candle[]): { volumes: number[]; volumeType: 'EXCHANGE' | 'TICK_PROXY' } {
+export function macdSeries(closes: number[], fast = 12, slow = 26, signal = 9) {
+  const fArr = emaArray(closes, fast);
+  const sArr = emaArray(closes, slow);
+  const macdLine: number[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (fArr[i] != null && sArr[i] != null) {
+      macdLine.push(fArr[i]! - sArr[i]!);
+    }
+  }
+  if (macdLine.length < signal + 2) {
+    return { macd: null as number | null, signal: null as number | null, hist: null as number | null, prevHist: null as number | null };
+  }
+  const sigArr = emaArray(macdLine, signal);
+  const lastM = macdLine[macdLine.length - 1];
+  const lastS = sigArr[sigArr.length - 1];
+  const prevS = sigArr[sigArr.length - 2];
+  if (lastS == null) {
+    return { macd: null, signal: null, hist: null, prevHist: null };
+  }
+  const hist = lastM - lastS;
+  const prevHist = macdLine[macdLine.length - 2] - (prevS ?? lastS);
+  return { macd: lastM, signal: lastS, hist, prevHist };
+}
+
+export function getEffectiveVolumes(candles: Candle[]): { volumes: number[]; volumeType: 'EXCHANGE' | 'TICK_PROXY' } {
   const nonZero = candles.filter((c) => c.volume > 0).length;
   const hasExchange = nonZero >= Math.max(5, candles.length * 0.4);
   if (hasExchange) {
-    // Use real exchange volume; for zero-volume forming bar, preserve 0 or handle cleanly
     return {
       volumes: candles.map((c) => c.volume),
       volumeType: 'EXCHANGE',
     };
   }
-  // Tick/range activity proxy strictly labeled TICK_PROXY
   return {
     volumes: candles.map((c) => Math.max(1, Math.round((c.high - c.low) * 100 + Math.abs(c.close - c.open) * 50))),
     volumeType: 'TICK_PROXY',
   };
 }
 
-function lastNonNull(arr: Array<number | null>): { value: number | null; prev: number | null; index: number } {
+export function obvSeries(candles: Candle[], signalPeriod = 20) {
+  if (candles.length < signalPeriod + 2) {
+    return { obv: null as number | null, signal: null as number | null, prevObv: null as number | null, volumeType: 'TICK_PROXY' as const };
+  }
+  const { volumes, volumeType } = getEffectiveVolumes(candles);
+  const obv: number[] = [0];
+  for (let i = 1; i < candles.length; i++) {
+    if (candles[i].close > candles[i - 1].close) obv.push(obv[i - 1] + volumes[i]);
+    else if (candles[i].close < candles[i - 1].close) obv.push(obv[i - 1] - volumes[i]);
+    else obv.push(obv[i - 1]);
+  }
+  const emaObv = emaArray(obv, signalPeriod);
+  const lastSig = lastNonNull(emaObv).value;
+  return {
+    obv: obv[obv.length - 1],
+    prevObv: obv[obv.length - 2] ?? obv[obv.length - 1],
+    signal: lastSig,
+    volumeType,
+  };
+}
+
+export function lastNonNull(arr: Array<number | null>): { value: number | null; prev: number | null; index: number } {
   for (let i = arr.length - 1; i >= 0; i--) {
     if (arr[i] != null && Number.isFinite(arr[i])) {
       let prev: number | null = null;

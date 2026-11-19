@@ -1,16 +1,32 @@
-import { useState } from 'react';
-import { Check, ChevronRight, FileText, ImageDown, Trash2, TrendingDown, TrendingUp, Minus } from 'lucide-react';
-import type { AnalysisReport, SignalClassification } from '../types/market.ts';
+import { memo, useCallback, useMemo, useState } from 'react';
+import {
+  Check,
+  ChevronRight,
+  FileText,
+  ImageDown,
+  Minus,
+  ShieldAlert,
+  Trash2,
+  TrendingDown,
+  TrendingUp,
+} from 'lucide-react';
+import type {
+  AnalysisReport,
+  NewsProtectionState,
+  SignalClassification,
+} from '../types/market.ts';
 import {
   renderAnalysisReportJpg,
   triggerJpgDownload,
   type RenderedJpgReport,
 } from '../utils/exportReportJpg.ts';
+import { getReportSignalConfidence } from '../utils/signalConfidence.ts';
 import { AnalysisResultView } from './AnalysisResultView.tsx';
 import { JpgPreviewModal } from './JpgPreviewModal.tsx';
 
 interface SignalsViewProps {
   reports: AnalysisReport[];
+  newsProtection: NewsProtectionState | null;
   loading: boolean;
   onDeleteReport: (id: string) => Promise<void>;
   onGoToTrade: () => void;
@@ -18,8 +34,9 @@ interface SignalsViewProps {
 
 type FilterOption = 'ALL' | SignalClassification;
 
-export function SignalsView({
+export const SignalsView = memo(function SignalsView({
   reports,
+  newsProtection,
   loading,
   onDeleteReport,
   onGoToTrade,
@@ -32,29 +49,39 @@ export function SignalsView({
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  if (selectedReport) {
-    return (
-      <AnalysisResultView
-        report={selectedReport}
-        onBack={() => setSelectedReport(null)}
-        backLabel="Back to Signals History"
-      />
-    );
-  }
+  const filteredItems = useMemo(() => {
+    const list = filter === 'ALL' ? reports : reports.filter((r) => r.classification === filter);
+    return list.map((report) => ({
+      report,
+      dt: new Date(report.createdAt).toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      confidence: getReportSignalConfidence(report),
+      indicatorNamesJoined: report.selectedIndicators.map((i) => i.name).join(', '),
+    }));
+  }, [reports, filter]);
 
-  const filtered = filter === 'ALL' ? reports : reports.filter((r) => r.classification === filter);
+  const handleCloseReport = useCallback(() => setSelectedReport(null), []);
+  const handleClosePreview = useCallback(() => setPreviewJpg(null), []);
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    setDeletingId(id);
-    try {
-      await onDeleteReport(id);
-    } finally {
-      setDeletingId(null);
-    }
-  };
+  const handleDelete = useCallback(
+    async (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      setDeletingId(id);
+      try {
+        await onDeleteReport(id);
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [onDeleteReport]
+  );
 
-  const handleExportJpg = (e: React.MouseEvent, report: AnalysisReport) => {
+  const handleExportJpg = useCallback((e: React.MouseEvent, report: AnalysisReport) => {
     e.stopPropagation();
     setExportError(null);
     try {
@@ -71,7 +98,17 @@ export function SignalsView({
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Unable to export JPG image');
     }
-  };
+  }, []);
+
+  if (selectedReport) {
+    return (
+      <AnalysisResultView
+        report={selectedReport}
+        onBack={handleCloseReport}
+        backLabel="Back to Signals History"
+      />
+    );
+  }
 
   return (
     <div className="space-y-4 pb-6">
@@ -102,6 +139,30 @@ export function SignalsView({
         </div>
       </div>
 
+      {/* Centralized News Protection Status Banner */}
+      {(newsProtection?.blocked || newsProtection?.warningActive) && (
+        <div
+          role="alert"
+          className="rounded-2xl border border-red-500/70 bg-gradient-to-r from-[#2A0B0F] via-[#1B090C] to-[#2A0B0F] px-4 py-3 shadow-[0_0_26px_-6px_rgba(239,68,68,0.55)]"
+        >
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0 mt-0.5 animate-pulse" />
+            <div className="space-y-0.5 min-w-0">
+              <div className="text-xs sm:text-sm font-display font-extrabold tracking-wider text-red-400 uppercase">
+                {newsProtection.blocked
+                  ? 'HIGH IMPACT NEWS — TRADING PAUSED'
+                  : 'HIGH IMPACT NEWS COMING'}
+              </div>
+              <p className="text-[11px] text-red-100/85 leading-relaxed">
+                {newsProtection.blocked
+                  ? `${newsProtection.subtext} Items listed below are historical snapshots only and not active trade signals.`
+                  : newsProtection.subtext}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {exportNotice && (
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-2 text-xs font-mono text-emerald-300 truncate">
           JPG exported to local downloads: {exportNotice}
@@ -124,7 +185,7 @@ export function SignalsView({
             />
           ))}
         </div>
-      ) : filtered.length === 0 ? (
+      ) : filteredItems.length === 0 ? (
         <div className="rounded-2xl border border-white/10 bg-[#121318] p-8 text-center space-y-3">
           <div className="mx-auto w-11 h-11 rounded-2xl bg-[#D4AF37]/10 border border-[#D4AF37]/30 flex items-center justify-center text-[#D4AF37]">
             <FileText className="w-5 h-5" />
@@ -151,7 +212,7 @@ export function SignalsView({
         </div>
       ) : (
         <div className="space-y-2.5">
-          {filtered.map((report) => {
+          {filteredItems.map(({ report, dt, confidence, indicatorNamesJoined }) => {
             const classColor =
               report.classification === 'BUY'
                 ? 'text-emerald-400'
@@ -164,13 +225,6 @@ export function SignalsView({
                 : report.classification === 'SELL'
                 ? TrendingDown
                 : Minus;
-            const dt = new Date(report.createdAt).toLocaleString([], {
-              month: 'short',
-              day: 'numeric',
-              year: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            });
 
             return (
               <div
@@ -190,7 +244,15 @@ export function SignalsView({
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                     <span className={`inline-flex items-center gap-1.5 text-sm font-display font-bold ${classColor}`}>
                       <Icon className="w-4 h-4" />
-                      <span>{report.classification}</span>
+                      <span>{report.strategyEvaluation?.action ?? report.classification}</span>
+                    </span>
+                    {report.strategyEvaluation && (
+                      <span className="text-xs font-mono tabular-nums text-[#F5D061]">
+                        · {report.strategyEvaluation.totalScore}/100 ({report.strategyEvaluation.scoreCategory})
+                      </span>
+                    )}
+                    <span className="text-xs font-mono tabular-nums text-zinc-200">
+                      · {confidence.scorePct}% conf
                     </span>
                     <span className="text-xs font-mono tabular-nums text-zinc-200">
                       · ${report.spotPrice.toFixed(2)}
@@ -202,14 +264,13 @@ export function SignalsView({
                     Timeframes: {report.selectedTimeframes.join(', ')} · {report.freshness}
                     {report.tradeLevels && (
                       <span className="text-zinc-200">
-                        {' '}· SL ${report.tradeLevels.stopLoss.toFixed(2)} · TP1 ${report.tradeLevels.takeProfit1.toFixed(2)}
+                        {' '}· SL ${report.tradeLevels.stopLoss.toFixed(2)} · TP ${report.tradeLevels.takeProfit1.toFixed(2)} ({report.tradeLevels.rewardRiskRatio1})
                       </span>
                     )}
                   </div>
 
                   <div className="text-[11px] text-zinc-400 truncate">
-                    Indicators ({report.selectedIndicators.length}):{' '}
-                    {report.selectedIndicators.map((i) => i.name).join(', ')}
+                    Indicators ({report.selectedIndicators.length}): {indicatorNamesJoined}
                   </div>
                 </div>
 
@@ -251,8 +312,8 @@ export function SignalsView({
         </div>
       )}
       {previewJpg && (
-        <JpgPreviewModal rendered={previewJpg} onClose={() => setPreviewJpg(null)} />
+        <JpgPreviewModal rendered={previewJpg} onClose={handleClosePreview} />
       )}
     </div>
   );
-}
+});

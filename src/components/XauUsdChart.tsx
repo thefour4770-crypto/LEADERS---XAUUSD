@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CandlestickSeries,
   ColorType,
@@ -81,9 +81,9 @@ function applyLiveQuoteToCandles(
     const safeTime = bucket > last.time ? bucket : last.time + tfSec;
     next.push({
       time: safeTime,
-      open: price,
-      high: price,
-      low: price,
+      open: last.close,
+      high: Math.max(last.close, price),
+      low: Math.min(last.close, price),
       close: price,
       volume: 0,
     });
@@ -92,7 +92,7 @@ function applyLiveQuoteToCandles(
   return next;
 }
 
-export function XauUsdChart({
+export const XauUsdChart = memo(function XauUsdChart({
   candles,
   overlays,
   timeframe,
@@ -115,12 +115,137 @@ export function XauUsdChart({
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const lastFittedTfRef = useRef<Timeframe | null>(null);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
-  const lastRenderedCandleRef = useRef<Candle | null>(null);
+
+  // Persistent refs for continuous 60/120fps requestAnimationFrame loop
+  const renderedBarRef = useRef<Candle | null>(null);
+  const targetBarRef = useRef<Candle | null>(null);
   const animFrameRef = useRef<number | null>(null);
+  const lastFrameTsRef = useRef<number>(0);
   const lastRolloverBucketRef = useRef<number>(0);
+  const lastPriceLineUpRef = useRef<boolean | null>(null);
+  const lastCrosshairKeyRef = useRef<string | null>(null);
+  const showVolumeRef = useRef<boolean>(showVolume);
+  const hasExchangeVolumeRef = useRef<boolean>(hasExchangeVolume);
+  showVolumeRef.current = showVolume;
+  hasExchangeVolumeRef.current = hasExchangeVolume;
+
+  // Direct DOM refs keep OHLC price readout bar synchronized with candlestick at 60fps
+  const ohlcOpenRef = useRef<HTMLElement | null>(null);
+  const ohlcHighRef = useRef<HTMLElement | null>(null);
+  const ohlcLowRef = useRef<HTMLElement | null>(null);
+  const ohlcCloseRef = useRef<HTMLElement | null>(null);
+  const readoutRef = useRef<CrosshairReadout | null>(null);
 
   const [readout, setReadout] = useState<CrosshairReadout | null>(null);
-  const [liveLatestBar, setLiveLatestBar] = useState<Candle | null>(null);
+
+  const syncOhlcDom = useCallback((bar: Candle) => {
+    if (readoutRef.current !== null) return;
+    if (ohlcOpenRef.current) ohlcOpenRef.current.textContent = bar.open.toFixed(2);
+    if (ohlcHighRef.current) ohlcHighRef.current.textContent = bar.high.toFixed(2);
+    if (ohlcLowRef.current) ohlcLowRef.current.textContent = bar.low.toFixed(2);
+    if (ohlcCloseRef.current) ohlcCloseRef.current.textContent = bar.close.toFixed(2);
+  }, []);
+
+  const pushCandleAndVolumeToChart = useCallback(
+    (bar: Candle) => {
+      const candleSeries = candleSeriesRef.current;
+      const volumeSeries = volumeSeriesRef.current;
+      if (!candleSeries) return;
+
+      candleSeries.update({
+        time: bar.time as Time,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      });
+
+      const isUp = bar.close >= bar.open;
+      if (lastPriceLineUpRef.current !== isUp) {
+        lastPriceLineUpRef.current = isUp;
+        candleSeries.applyOptions({
+          priceLineColor: isUp ? '#10B981' : '#EF4444',
+        });
+      }
+
+      if (volumeSeries && showVolumeRef.current) {
+        const volVal = hasExchangeVolumeRef.current
+          ? bar.volume
+          : Math.round((bar.high - bar.low) * 100 + Math.abs(bar.close - bar.open) * 50);
+        volumeSeries.update({
+          time: bar.time as Time,
+          value: volVal,
+          color: isUp ? 'rgba(16, 185, 129, 0.28)' : 'rgba(239, 68, 68, 0.28)',
+        });
+      }
+
+      renderedBarRef.current = bar;
+      candleMapRef.current.set(bar.time, bar);
+      syncOhlcDom(bar);
+    },
+    [syncOhlcDom]
+  );
+
+  const ensureRafLoopRunning = useCallback(() => {
+    if (animFrameRef.current !== null) return;
+    lastFrameTsRef.current = performance.now();
+
+    const step = (now: number) => {
+      const target = targetBarRef.current;
+      const prev = renderedBarRef.current;
+      const candleSeries = candleSeriesRef.current;
+
+      if (!target || !candleSeries) {
+        animFrameRef.current = null;
+        return;
+      }
+
+      const dtSec = Math.min(0.05, Math.max(0.001, (now - lastFrameTsRef.current) / 1000));
+      lastFrameTsRef.current = now;
+
+      // If switching to a new candle bar, anchor interpolation from open price cleanly
+      const startBar =
+        prev && prev.time === target.time
+          ? prev
+          : {
+              time: target.time,
+              open: target.open,
+              high: target.open,
+              low: target.open,
+              close: target.open,
+              volume: target.volume,
+            };
+
+      const diff = target.close - startBar.close;
+      const converged = Math.abs(diff) < 0.005;
+
+      if (converged) {
+        pushCandleAndVolumeToChart(target);
+        animFrameRef.current = null;
+        return;
+      }
+
+      // Frame-rate-independent exponential smoothing (never resets/stutters between rapid ticks)
+      const alpha = 1 - Math.exp(-dtSec * 15);
+      const nextClose = Number((startBar.close + diff * alpha).toFixed(2));
+      const nextHigh = Math.max(startBar.high, target.open, nextClose);
+      const nextLow = Math.min(startBar.low, target.open, nextClose);
+
+      const frameBar: Candle = {
+        time: target.time,
+        open: target.open,
+        high: Number(nextHigh.toFixed(2)),
+        low: Number(nextLow.toFixed(2)),
+        close: nextClose,
+        volume: target.volume,
+      };
+
+      pushCandleAndVolumeToChart(frameBar);
+      animFrameRef.current = requestAnimationFrame(step);
+    };
+
+    animFrameRef.current = requestAnimationFrame(step);
+  }, [pushCandleAndVolumeToChart]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -197,14 +322,21 @@ export function XauUsdChart({
 
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) {
-        setReadout(null);
+        if (readoutRef.current !== null) {
+          readoutRef.current = null;
+          lastCrosshairKeyRef.current = null;
+          setReadout(null);
+        }
         return;
       }
       const ts = typeof param.time === 'number' ? param.time : null;
       if (ts == null) return;
       const bar = candleMapRef.current.get(ts);
       if (bar) {
-        setReadout({
+        const key = `${bar.time}:${bar.close}:${bar.high}:${bar.low}`;
+        if (lastCrosshairKeyRef.current === key) return;
+        lastCrosshairKeyRef.current = key;
+        const nextReadout = {
           open: bar.open,
           high: bar.high,
           low: bar.low,
@@ -216,7 +348,9 @@ export function XauUsdChart({
             hour: '2-digit',
             minute: '2-digit',
           }),
-        });
+        };
+        readoutRef.current = nextReadout;
+        setReadout(nextReadout);
       }
     });
 
@@ -242,26 +376,31 @@ export function XauUsdChart({
       volumeSeriesRef.current = null;
       overlaySeriesMapRef.current.clear();
       priceLinesRef.current = [];
-      lastRenderedCandleRef.current = null;
+      renderedBarRef.current = null;
+      targetBarRef.current = null;
+      lastPriceLineUpRef.current = null;
+      lastCrosshairKeyRef.current = null;
     };
   }, []);
 
-  // Update full candle & volume series when candles or timeframe change
+  // Re-sync live OHLC DOM text immediately when crosshair pointer leaves chart
+  useEffect(() => {
+    if (readout === null && renderedBarRef.current) {
+      syncOhlcDom(renderedBarRef.current);
+    }
+  }, [readout, syncOhlcDom]);
+
+  // Update full candle & volume series when historical candles or timeframe change
   useEffect(() => {
     const chart = chartRef.current;
     const candleSeries = candleSeriesRef.current;
     const volumeSeries = volumeSeriesRef.current;
     if (!chart || !candleSeries || !volumeSeries) return;
 
-    if (animFrameRef.current !== null) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = null;
-    }
-
     const synced = applyLiveQuoteToCandles(candles, timeframe, liveQuote);
+    const timeframeChanged = lastFittedTfRef.current !== timeframe;
+    const prevRendered = timeframeChanged ? null : renderedBarRef.current;
 
-    // Preserve intra-bar high/low captured by fast live ticks when background candles reload
-    const prevRendered = lastRenderedCandleRef.current;
     if (prevRendered && synced.length > 0) {
       const latestSynced = synced[synced.length - 1];
       if (latestSynced.time === prevRendered.time) {
@@ -277,13 +416,33 @@ export function XauUsdChart({
     if (synced.length === 0) {
       candleSeries.setData([]);
       volumeSeries.setData([]);
-      lastRenderedCandleRef.current = null;
-      setLiveLatestBar(null);
+      renderedBarRef.current = null;
+      targetBarRef.current = null;
+      lastPriceLineUpRef.current = null;
       return;
     }
 
+    const targetLatest = { ...synced[synced.length - 1] };
+    // Preserve smooth in-flight close when 5s background candles refresh on the same bar
+    const displaySynced = synced.map((c, idx) => {
+      if (
+        idx === synced.length - 1 &&
+        prevRendered &&
+        prevRendered.time === c.time &&
+        Math.abs(prevRendered.close - c.close) >= 0.005
+      ) {
+        return {
+          ...c,
+          close: prevRendered.close,
+          high: Math.max(c.high, prevRendered.high),
+          low: Math.min(c.low, prevRendered.low),
+        };
+      }
+      return c;
+    });
+
     candleSeries.setData(
-      synced.map((c) => ({
+      displaySynced.map((c) => ({
         time: c.time as Time,
         open: c.open,
         high: c.high,
@@ -292,17 +451,24 @@ export function XauUsdChart({
       }))
     );
 
-    const latest = synced[synced.length - 1];
-    candleSeries.applyOptions({
-      priceLineColor: latest.close >= latest.open ? '#10B981' : '#EF4444',
-    });
-    lastRenderedCandleRef.current = { ...latest };
-    setLiveLatestBar(latest);
+    const drawnLast = displaySynced[displaySynced.length - 1];
+    const drawnUp = drawnLast.close >= drawnLast.open;
+    if (lastPriceLineUpRef.current !== drawnUp) {
+      lastPriceLineUpRef.current = drawnUp;
+      candleSeries.applyOptions({
+        priceLineColor: drawnUp ? '#10B981' : '#EF4444',
+      });
+    }
+    renderedBarRef.current = { ...drawnLast };
+    targetBarRef.current = targetLatest;
+    syncOhlcDom(drawnLast);
 
     if (showVolume) {
       volumeSeries.setData(
-        synced.map((c) => {
-          const val = hasExchangeVolume ? c.volume : Math.round((c.high - c.low) * 100 + Math.abs(c.close - c.open) * 50);
+        displaySynced.map((c) => {
+          const val = hasExchangeVolume
+            ? c.volume
+            : Math.round((c.high - c.low) * 100 + Math.abs(c.close - c.open) * 50);
           return {
             time: c.time as Time,
             value: val,
@@ -318,25 +484,30 @@ export function XauUsdChart({
       scaleMargins: { top: 0.08, bottom: showVolume ? 0.2 : 0.08 },
     });
 
-    if (lastFittedTfRef.current !== timeframe) {
-      const visibleCount = Math.min(synced.length, 75);
+    if (timeframeChanged) {
+      if (animFrameRef.current !== null) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+      }
+      const visibleCount = Math.min(displaySynced.length, 75);
       chart.timeScale().setVisibleLogicalRange({
-        from: Math.max(0, synced.length - visibleCount),
-        to: synced.length + 2,
+        from: Math.max(0, displaySynced.length - visibleCount),
+        to: displaySynced.length + 2,
       });
       lastFittedTfRef.current = timeframe;
+    } else if (Math.abs(targetLatest.close - drawnLast.close) >= 0.005) {
+      ensureRafLoopRunning();
     }
-    // liveQuote is intentionally handled incrementally by the smooth tick effect below
+    // liveQuote ticks flow incrementally through the dedicated smooth rAF effect below
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles, timeframe, showVolume, hasExchangeVolume]);
 
-  // Smoothly animate and update active forming candle on every live quote tick
+  // Feed every incoming live quote into the continuous rAF interpolation target
   useEffect(() => {
-    const candleSeries = candleSeriesRef.current;
-    const prevLast = lastRenderedCandleRef.current;
+    const prevBase = targetBarRef.current ?? renderedBarRef.current;
     if (
-      !candleSeries ||
-      !prevLast ||
+      !candleSeriesRef.current ||
+      !prevBase ||
       !liveQuote ||
       liveQuote.freshness === 'UNAVAILABLE' ||
       !Number.isFinite(liveQuote.mid) ||
@@ -349,104 +520,36 @@ export function XauUsdChart({
     const quoteSec = Math.floor(liveQuote.timestamp / 1000);
     const targetPrice = Number(liveQuote.mid.toFixed(2));
 
-    let targetBar: Candle | null = null;
-    let fromClose = prevLast.close;
-
-    if (quoteSec >= prevLast.time && quoteSec - prevLast.time < tfSec) {
-      targetBar = {
-        time: prevLast.time,
-        open: prevLast.open,
-        high: Math.max(prevLast.high, targetPrice),
-        low: Math.min(prevLast.low, targetPrice),
+    if (quoteSec >= prevBase.time && quoteSec - prevBase.time < tfSec) {
+      targetBarRef.current = {
+        time: prevBase.time,
+        open: prevBase.open,
+        high: Math.max(prevBase.high, targetPrice),
+        low: Math.min(prevBase.low, targetPrice),
         close: targetPrice,
-        volume: prevLast.volume,
+        volume: prevBase.volume,
       };
-    } else if (quoteSec - prevLast.time >= tfSec) {
+    } else if (quoteSec - prevBase.time >= tfSec) {
       const bucket = Math.floor(quoteSec / tfSec) * tfSec;
-      const safeTime = bucket > prevLast.time ? bucket : prevLast.time + tfSec;
+      const safeTime = bucket > prevBase.time ? bucket : prevBase.time + tfSec;
       if (lastRolloverBucketRef.current !== safeTime) {
         lastRolloverBucketRef.current = safeTime;
         onCandleRollover?.();
       }
-      fromClose = prevLast.close;
-      targetBar = {
+      targetBarRef.current = {
         time: safeTime,
-        open: prevLast.close,
-        high: Math.max(prevLast.close, targetPrice),
-        low: Math.min(prevLast.close, targetPrice),
+        open: prevBase.close,
+        high: Math.max(prevBase.close, targetPrice),
+        low: Math.min(prevBase.close, targetPrice),
         close: targetPrice,
         volume: 0,
       };
-    }
-
-    if (!targetBar) return;
-
-    if (animFrameRef.current !== null) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = null;
-    }
-
-    const finalBar = targetBar;
-    const startClose = fromClose;
-    const baseHigh = finalBar.time === prevLast.time ? prevLast.high : finalBar.open;
-    const baseLow = finalBar.time === prevLast.time ? prevLast.low : finalBar.open;
-
-    candleSeries.applyOptions({
-      priceLineColor: finalBar.close >= finalBar.open ? '#10B981' : '#EF4444',
-    });
-
-    // Immediate update when price didn't change
-    if (Math.abs(finalBar.close - startClose) < 0.005) {
-      candleSeries.update({
-        time: finalBar.time as Time,
-        open: finalBar.open,
-        high: finalBar.high,
-        low: finalBar.low,
-        close: finalBar.close,
-      });
-      lastRenderedCandleRef.current = finalBar;
-      candleMapRef.current.set(finalBar.time, finalBar);
-      setLiveLatestBar(finalBar);
+    } else {
       return;
     }
 
-    const durationMs = 180;
-    const startTime = performance.now();
-
-    const step = (now: number) => {
-      const t = Math.min(1, (now - startTime) / durationMs);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const currentClose = Number((startClose + (finalBar.close - startClose) * eased).toFixed(2));
-      const frameBar: Candle = {
-        time: finalBar.time,
-        open: finalBar.open,
-        high: t === 1 ? finalBar.high : Math.max(baseHigh, currentClose),
-        low: t === 1 ? finalBar.low : Math.min(baseLow, currentClose),
-        close: t === 1 ? finalBar.close : currentClose,
-        volume: finalBar.volume,
-      };
-
-      candleSeries.update({
-        time: frameBar.time as Time,
-        open: frameBar.open,
-        high: frameBar.high,
-        low: frameBar.low,
-        close: frameBar.close,
-      });
-      lastRenderedCandleRef.current = frameBar;
-      candleMapRef.current.set(frameBar.time, frameBar);
-
-      if (t < 1) {
-        animFrameRef.current = requestAnimationFrame(step);
-      } else {
-        animFrameRef.current = null;
-        setLiveLatestBar(finalBar);
-      }
-    };
-
-    setLiveLatestBar(finalBar);
-    animFrameRef.current = requestAnimationFrame(step);
-  }, [liveQuote, timeframe]);
+    ensureRafLoopRunning();
+  }, [liveQuote, timeframe, onCandleRollover, ensureRafLoopRunning]);
 
   // Update indicator overlays
   useEffect(() => {
@@ -530,7 +633,7 @@ export function XauUsdChart({
     }
   }, [supportLevels, resistanceLevels]);
 
-  const handleZoom = (direction: 'in' | 'out') => {
+  const handleZoom = useCallback((direction: 'in' | 'out') => {
     const chart = chartRef.current;
     if (!chart) return;
     const range = chart.timeScale().getVisibleLogicalRange();
@@ -542,9 +645,9 @@ export function XauUsdChart({
       from: Math.max(0, nextFrom),
       to: range.to,
     });
-  };
+  }, []);
 
-  const handleResetZoom = () => {
+  const handleResetZoom = useCallback(() => {
     const chart = chartRef.current;
     if (!chart || candles.length === 0) return;
     const visibleCount = Math.min(candles.length, 75);
@@ -552,9 +655,10 @@ export function XauUsdChart({
       from: Math.max(0, candles.length - visibleCount),
       to: candles.length + 2,
     });
-  };
+  }, [candles.length]);
 
-  const latestBar = liveLatestBar ?? candles[candles.length - 1];
+  const legendOverlays = useMemo(() => overlays.slice(0, 6), [overlays]);
+  const latestBar = renderedBarRef.current ?? candles[candles.length - 1];
   const activeBar = readout ?? (latestBar ? { ...latestBar, time: '' } : null);
 
   return (
@@ -569,10 +673,30 @@ export function XauUsdChart({
           <span className="font-semibold text-[#F5D061]">{timeframe}</span>
           {activeBar && (
             <>
-              <span>O <strong className="text-zinc-200">{activeBar.open.toFixed(2)}</strong></span>
-              <span>H <strong className="text-zinc-200">{activeBar.high.toFixed(2)}</strong></span>
-              <span>L <strong className="text-zinc-200">{activeBar.low.toFixed(2)}</strong></span>
-              <span>C <strong className="text-zinc-200">{activeBar.close.toFixed(2)}</strong></span>
+              <span>
+                O{' '}
+                <strong ref={readout ? undefined : ohlcOpenRef} className="text-zinc-200">
+                  {activeBar.open.toFixed(2)}
+                </strong>
+              </span>
+              <span>
+                H{' '}
+                <strong ref={readout ? undefined : ohlcHighRef} className="text-zinc-200">
+                  {activeBar.high.toFixed(2)}
+                </strong>
+              </span>
+              <span>
+                L{' '}
+                <strong ref={readout ? undefined : ohlcLowRef} className="text-zinc-200">
+                  {activeBar.low.toFixed(2)}
+                </strong>
+              </span>
+              <span>
+                C{' '}
+                <strong ref={readout ? undefined : ohlcCloseRef} className="text-zinc-200">
+                  {activeBar.close.toFixed(2)}
+                </strong>
+              </span>
               {activeBar.time && <span className="text-zinc-500">{activeBar.time}</span>}
             </>
           )}
@@ -617,7 +741,7 @@ export function XauUsdChart({
       {/* Overlay Legend (Unboxed Metadata Text) */}
       {overlays.length > 0 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 bg-[#0B0C10] border-b border-white/5 text-[11px] font-mono text-zinc-400">
-          {overlays.slice(0, 6).map((ov) => (
+          {legendOverlays.map((ov) => (
             <span key={ov.id} className="inline-flex items-center gap-1.5 whitespace-nowrap">
               <span className="w-2.5 h-0.5 inline-block" style={{ backgroundColor: ov.color }} />
               <span>{ov.label}</span>
@@ -658,4 +782,4 @@ export function XauUsdChart({
       </div>
     </div>
   );
-}
+});

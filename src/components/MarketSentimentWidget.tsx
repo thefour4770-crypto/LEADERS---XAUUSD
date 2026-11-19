@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Activity, AlertCircle, Minus, TrendingDown, TrendingUp } from 'lucide-react';
 import type { MarketSentiment24h } from '../types/market.ts';
 
@@ -7,7 +8,11 @@ interface MarketSentimentWidgetProps {
   error: string | null;
 }
 
-export function MarketSentimentWidget({ sentiment, loading, error }: MarketSentimentWidgetProps) {
+export const MarketSentimentWidget = memo(function MarketSentimentWidget({
+  sentiment,
+  loading,
+  error,
+}: MarketSentimentWidgetProps) {
   if (loading && !sentiment) {
     return (
       <section className="rounded-2xl border border-white/10 bg-[#121318] p-4 space-y-3 animate-pulse">
@@ -126,4 +131,4 @@ export function MarketSentimentWidget({ sentiment, loading, error }: MarketSenti
       </div>
     </section>
   );
-}
+});

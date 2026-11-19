@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Check } from 'lucide-react';
 import { ALL_TIMEFRAMES, type Timeframe } from '../types/market.ts';
 
@@ -11,7 +12,7 @@ interface TimeframeSelectorProps {
   mode?: 'both' | 'analysis-only' | 'chart-only';
 }
 
-export function TimeframeSelector({
+export const TimeframeSelector = memo(function TimeframeSelector({
   activeChartTimeframe,
   selectedTimeframes,
   onSelectChartTimeframe,
@@ -74,10 +75,10 @@ export function TimeframeSelector({
             <div className="flex items-center gap-2 text-[11px]">
               <button
                 type="button"
-                onClick={() => onSetPresetTimeframes(['15m', '1H', '4H', '1D'])}
+                onClick={() => onSetPresetTimeframes(['1m', '5m', '15m', '1H'])}
                 className="text-[#D4AF37] hover:text-[#F5D061] font-medium transition-colors py-1 px-1.5"
               >
-                Core Multi (4)
+                Strict Core (4)
               </button>
               <span className="text-zinc-600">/</span>
               <button
@@ -115,4 +116,4 @@ export function TimeframeSelector({
       )}
     </div>
   );
-}
+});

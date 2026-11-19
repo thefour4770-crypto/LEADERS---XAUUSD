@@ -18,8 +18,10 @@ export default defineConfig(() => {
           'pwa-192x192.png',
           'pwa-512x512.png',
           'pwa-maskable-512x512.png',
+          'assets/aistudio/images_0b890af9.png',
           'screenshot-mobile.png',
           'screenshot-desktop.png',
+          'sw-notifications.js',
         ],
         manifest: {
           id: '/',
@@ -87,6 +89,8 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          importScripts: ['/sw-notifications.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [

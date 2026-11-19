@@ -177,6 +177,7 @@ function scheduleNextCollectorTick() {
     }
     scheduleNextCollectorTick();
   }, delay);
+  collectorTimer.unref?.();
 }
 
 function touchLiveSpotCollector() {
@@ -186,10 +187,12 @@ function touchLiveSpotCollector() {
   }
 }
 
-// Start background recorder immediately on server boot so 1m history stays continuous
-void ensureSpotStoreLoaded().then(() => {
-  scheduleNextCollectorTick();
-});
+// Start background recorder immediately on server boot (skip side-effect under test context)
+if (!process.env.NODE_TEST_CONTEXT && !process.argv.some((a) => a.includes('--test'))) {
+  void ensureSpotStoreLoaded().then(() => {
+    scheduleNextCollectorTick();
+  });
+}
 
 async function fetchPreviousCloseCached(): Promise<number | undefined> {
   const now = Date.now();
@@ -494,6 +497,169 @@ async function fetchYahooCandlesBase(timeframe: Timeframe): Promise<CandleDatase
   }
 }
 
+export const TIMEFRAME_SECONDS: Record<Timeframe, number> = {
+  '1m': YAHOO_TIMEFRAME_MAP['1m'].seconds,
+  '5m': YAHOO_TIMEFRAME_MAP['5m'].seconds,
+  '15m': YAHOO_TIMEFRAME_MAP['15m'].seconds,
+  '30m': YAHOO_TIMEFRAME_MAP['30m'].seconds,
+  '1H': YAHOO_TIMEFRAME_MAP['1H'].seconds,
+  '4H': YAHOO_TIMEFRAME_MAP['4H'].seconds,
+  '1D': YAHOO_TIMEFRAME_MAP['1D'].seconds,
+  '1W': YAHOO_TIMEFRAME_MAP['1W'].seconds,
+};
+
+/**
+ * Pure COMEX Gold Futures (GC=F) historical dataset with zero mixing from Spot feeds.
+ */
+export async function fetchPureFuturesCandles(timeframe: Timeframe): Promise<CandleDataset> {
+  await ensureSpotStoreLoaded();
+  touchLiveSpotCollector();
+  return fetchYahooCandlesBase(timeframe);
+}
+
+/**
+ * Pure Swissquote Spot XAU/USD candles aggregated solely from recorded real-time Spot BBO ticks.
+ * Never fabricates missing intervals or mixes COMEX futures candles.
+ */
+export async function getPureSpotCandles(timeframe: Timeframe): Promise<CandleDataset | null> {
+  await ensureSpotStoreLoaded();
+  if (liveSpot1mCandles.size === 0) return null;
+
+  const tfSeconds = TIMEFRAME_SECONDS[timeframe];
+  const aggregated = new Map<number, Candle>();
+  const sorted1m = Array.from(liveSpot1mCandles.values()).sort((a, b) => a.time - b.time);
+
+  for (const bar1m of sorted1m) {
+    const bucket = Math.floor(bar1m.time / tfSeconds) * tfSeconds;
+    const existing = aggregated.get(bucket);
+    if (existing) {
+      existing.high = Number(Math.max(existing.high, bar1m.high).toFixed(2));
+      existing.low = Number(Math.min(existing.low, bar1m.low).toFixed(2));
+      existing.close = bar1m.close;
+    } else {
+      aggregated.set(bucket, {
+        time: bucket,
+        open: bar1m.open,
+        high: bar1m.high,
+        low: bar1m.low,
+        close: bar1m.close,
+        volume: 0,
+      });
+    }
+  }
+
+  const candles = Array.from(aggregated.values()).sort((a, b) => a.time - b.time);
+  if (candles.length === 0) return null;
+
+  const latestTs = candles[candles.length - 1].time * 1000;
+  const quoteFresh = quoteCache.current?.data.freshness;
+  const freshness: FreshnessStatus =
+    quoteFresh === 'LIVE' && Date.now() - latestTs <= Math.max(120_000, tfSeconds * 1000 * 2)
+      ? 'LIVE'
+      : 'DELAYED';
+
+  return {
+    symbol: 'XAU/USD (Live Spot)',
+    candleSource: 'Swissquote Spot XAU/USD BBO Stream',
+    timeframe,
+    candles,
+    latestTimestamp: quoteCache.current?.data.timestamp ?? latestTs,
+    freshness,
+    hasExchangeVolume: false,
+    nonZeroVolumeRatio: 0,
+    volumeNote: 'Real-time Spot XAU/USD OHLC; tick activity proxy used where exchange volume is unavailable',
+  };
+}
+
+export async function getRecordedSpot1mCandlesSince(sinceUnixSec: number): Promise<Candle[]> {
+  await ensureSpotStoreLoaded();
+  return Array.from(liveSpot1mCandles.values())
+    .filter((c) => c.time >= sinceUnixSec)
+    .sort((a, b) => a.time - b.time);
+}
+
+export interface CandleIntegrityCheck {
+  valid: boolean;
+  ohlcErrors: string[];
+  gapWarnings: string[];
+  staleReason: string | null;
+}
+
+export function validateCandleSeriesIntegrity(
+  candles: Candle[],
+  timeframe: Timeframe,
+  nowSec = Math.floor(Date.now() / 1000),
+  maxDelaySec = Math.max(1_800, TIMEFRAME_SECONDS[timeframe] * 3)
+): CandleIntegrityCheck {
+  const ohlcErrors: string[] = [];
+  const gapWarnings: string[] = [];
+  const tfSec = TIMEFRAME_SECONDS[timeframe];
+
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return {
+      valid: false,
+      ohlcErrors: [`${timeframe}: Empty candle dataset`],
+      gapWarnings,
+      staleReason: `${timeframe}: No candles available`,
+    };
+  }
+
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    if (
+      !Number.isFinite(c.time) ||
+      c.time <= 0 ||
+      !Number.isFinite(c.open) ||
+      !Number.isFinite(c.high) ||
+      !Number.isFinite(c.low) ||
+      !Number.isFinite(c.close) ||
+      c.open <= 0 ||
+      c.high <= 0 ||
+      c.low <= 0 ||
+      c.close <= 0
+    ) {
+      ohlcErrors.push(`${timeframe}: Invalid numeric OHLC/timestamp at bar index ${i}`);
+      break;
+    }
+    if (c.high < Math.max(c.open, c.close) || c.low > Math.min(c.open, c.close) || c.high < c.low) {
+      ohlcErrors.push(`${timeframe}: Corrupted OHLC range at timestamp ${c.time}`);
+      break;
+    }
+    if (i > 0 && c.time <= candles[i - 1].time) {
+      ohlcErrors.push(`${timeframe}: Non-ascending timestamps (${candles[i - 1].time} -> ${c.time})`);
+      break;
+    }
+  }
+
+  // Check missing bar gaps across the most recent 24 bars (allowing normal ~1h COMEX maintenance or weekend)
+  const tail = candles.slice(-24);
+  let largeGapCount = 0;
+  for (let i = 1; i < tail.length; i++) {
+    const dt = tail[i].time - tail[i - 1].time;
+    // Flag intra-session gaps larger than 4 intervals (but < 4 hours which may be weekend/maintenance)
+    if (dt > tfSec * 4 && dt < 4 * 3_600) {
+      largeGapCount++;
+    }
+  }
+  if (largeGapCount >= 3) {
+    gapWarnings.push(`${timeframe}: Detected ${largeGapCount} missing-candle interval gaps in recent session`);
+  }
+
+  const lastBarTime = candles[candles.length - 1].time;
+  const ageSec = nowSec - lastBarTime;
+  const staleReason =
+    ageSec > maxDelaySec
+      ? `${timeframe}: Latest bar is ${Math.round(ageSec / 60)}m old (exceeds ${Math.round(maxDelaySec / 60)}m threshold)`
+      : null;
+
+  return {
+    valid: ohlcErrors.length === 0 && staleReason === null,
+    ohlcErrors,
+    gapWarnings,
+    staleReason,
+  };
+}
+
 export async function fetchCandles(timeframe: Timeframe): Promise<CandleDataset> {
   await ensureSpotStoreLoaded();
   touchLiveSpotCollector();
@@ -516,7 +682,7 @@ export async function fetchCandles(timeframe: Timeframe): Promise<CandleDataset>
   const lastBaseTime = baseDataset.candles[baseDataset.candles.length - 1]?.time ?? 0;
   let mergedLiveSpot = false;
 
-  // Aggregate real recorded live Swissquote Spot 1m bars into the requested timeframe
+  // Aggregate real recorded live Swissquote Spot 1m bars into the requested timeframe for live chart continuity
   if (liveSpot1mCandles.size > 0) {
     const aggregatedSpot = new Map<number, Candle>();
     const sorted1m = Array.from(liveSpot1mCandles.values()).sort((a, b) => a.time - b.time);
@@ -543,7 +709,6 @@ export async function fetchCandles(timeframe: Timeframe): Promise<CandleDataset>
     for (const spotBar of aggregatedSpot.values()) {
       const existingAtBucket = mergedByTime.get(spotBar.time);
       if (existingAtBucket) {
-        // Merge live spot ticks into overlapping or still-forming candle
         if (spotBar.time >= lastBaseTime) {
           existingAtBucket.high = Math.max(existingAtBucket.high, spotBar.high);
           existingAtBucket.low = Math.min(existingAtBucket.low, spotBar.low);
@@ -555,14 +720,12 @@ export async function fetchCandles(timeframe: Timeframe): Promise<CandleDataset>
         spotBar.time - lastBaseTime < tfSeconds &&
         mergedByTime.has(lastBaseTime)
       ) {
-        // Daily/weekly candles may open mid-day; update the active bar in place
         const activeBase = mergedByTime.get(lastBaseTime)!;
         activeBase.high = Math.max(activeBase.high, spotBar.high);
         activeBase.low = Math.min(activeBase.low, spotBar.low);
         activeBase.close = spotBar.close;
         mergedLiveSpot = true;
       } else {
-        // Fill any missing minute or append newer live spot bars seamlessly
         mergedByTime.set(spotBar.time, { ...spotBar });
         mergedLiveSpot = true;
       }
@@ -571,9 +734,8 @@ export async function fetchCandles(timeframe: Timeframe): Promise<CandleDataset>
 
   const candles = Array.from(mergedByTime.values()).sort((a, b) => a.time - b.time);
 
-  // Ensure the very latest live Swissquote tick is reflected immediately even on first load
+  // Reflect latest live Swissquote tick on the active forming bar on the chart
   if (liveQuote.freshness === 'LIVE' && liveQuote.mid > 0) {
-    const tfSeconds = cfg.seconds;
     const quoteSec = Math.floor(liveQuote.timestamp / 1000);
     const liveMid = Number(liveQuote.mid.toFixed(2));
     const currentLast = candles[candles.length - 1];
@@ -618,3 +780,4 @@ export async function fetchCandles(timeframe: Timeframe): Promise<CandleDataset>
       : baseDataset.candleSource,
   };
 }
+
