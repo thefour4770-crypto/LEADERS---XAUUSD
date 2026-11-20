@@ -16,6 +16,7 @@ export interface EnableAlertsResult {
   permissionState: NotificationPermissionState;
   inIframe: boolean;
   osNotificationDelivered: boolean;
+  backgroundPushActive: boolean;
   soundPlayed: boolean;
   message: string;
 }
@@ -171,6 +172,174 @@ export function requestPhoneNotificationPermission(): Promise<NotificationPermis
   }
 }
 
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(new ArrayBuffer(rawData.length));
+  for (let i = 0; i < rawData.length; i += 1) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+function areUint8ArraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+async function getActiveServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return null;
+  }
+  try {
+    const existingReg = await navigator.serviceWorker.getRegistration();
+    if (existingReg) return existingReg;
+    const readyReg = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2500)),
+    ]);
+    return readyReg;
+  } catch {
+    return null;
+  }
+}
+
+export function isWebPushSupported(): boolean {
+  if (typeof window === 'undefined') return false;
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+export async function hasActiveWebPushSubscription(): Promise<boolean> {
+  if (!isWebPushSupported() || getNotificationPermissionState() !== 'granted') {
+    return false;
+  }
+  try {
+    const reg = await getActiveServiceWorkerRegistration();
+    if (!reg?.pushManager) return false;
+    const sub = await reg.pushManager.getSubscription();
+    return Boolean(sub);
+  } catch {
+    return false;
+  }
+}
+
+let pendingWebPushSubscribe: Promise<{ subscribed: boolean; endpoint?: string }> | null = null;
+
+export async function ensureWebPushSubscribed(): Promise<{
+  subscribed: boolean;
+  endpoint?: string;
+}> {
+  if (!isWebPushSupported() || getNotificationPermissionState() !== 'granted') {
+    return { subscribed: false };
+  }
+  if (pendingWebPushSubscribe) {
+    return pendingWebPushSubscribe;
+  }
+
+  pendingWebPushSubscribe = (async () => {
+    try {
+      const reg = await getActiveServiceWorkerRegistration();
+      if (!reg?.pushManager) {
+        return { subscribed: false };
+      }
+
+      const keyRes = await fetch('/api/push/vapid-public-key');
+      if (!keyRes.ok) {
+        return { subscribed: false };
+      }
+      const keyJson = (await keyRes.json().catch(() => ({}))) as { publicKey?: string };
+      if (!keyJson.publicKey) {
+        return { subscribed: false };
+      }
+
+      const expectedKeyBytes = urlBase64ToUint8Array(keyJson.publicKey);
+      let sub = await reg.pushManager.getSubscription();
+
+      if (sub?.options?.applicationServerKey) {
+        const existingBytes = new Uint8Array(sub.options.applicationServerKey);
+        if (!areUint8ArraysEqual(existingBytes, expectedKeyBytes)) {
+          try {
+            await sub.unsubscribe();
+          } catch {
+            // Ignore unsubscribe error before re-subscribing
+          }
+          sub = null;
+        }
+      }
+
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: expectedKeyBytes,
+        });
+      }
+
+      const saveRes = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: sub.toJSON() }),
+      });
+
+      if (!saveRes.ok) {
+        return { subscribed: false };
+      }
+      return { subscribed: true, endpoint: sub.endpoint };
+    } catch {
+      return { subscribed: false };
+    }
+  })();
+
+  try {
+    return await pendingWebPushSubscribe;
+  } finally {
+    pendingWebPushSubscribe = null;
+  }
+}
+
+export async function unsubscribeWebPush(): Promise<void> {
+  if (!isWebPushSupported()) return;
+  try {
+    const reg = await getActiveServiceWorkerRegistration();
+    const sub = await reg?.pushManager?.getSubscription();
+    if (!sub) return;
+    await fetch('/api/push/unsubscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    }).catch(() => undefined);
+    await sub.unsubscribe().catch(() => undefined);
+  } catch {
+    // Non-fatal cleanup error
+  }
+}
+
+export async function syncWebPushSubscriptionIfEnabled(): Promise<boolean> {
+  if (!isPhoneAlertsEnabled() || getNotificationPermissionState() !== 'granted') {
+    return false;
+  }
+  const result = await ensureWebPushSubscribed();
+  return result.subscribed;
+}
+
+async function sendServerTestWebPush(endpoint?: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/push/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(endpoint ? { endpoint } : {}),
+    });
+    if (!res.ok) return false;
+    const json = (await res.json().catch(() => ({}))) as { delivered?: boolean };
+    return json.delivered === true;
+  } catch {
+    return false;
+  }
+}
+
 function getNotifiedIds(): Set<string> {
   try {
     const raw = window.localStorage.getItem(NOTIFIED_IDS_KEY);
@@ -249,22 +418,14 @@ async function showBrowserOrSwNotification(
   const normalizedOptions: ExtendedNotificationOptions = {
     ...options,
     renotify: options.renotify ?? Boolean(options.tag),
-    data: options.data ?? { url: '/' },
+    data: options.data ?? { url: '/?tab=SURE' },
   };
 
   try {
-    if ('serviceWorker' in navigator) {
-      const existingReg = await navigator.serviceWorker.getRegistration();
-      const reg =
-        existingReg ??
-        (await Promise.race([
-          navigator.serviceWorker.ready,
-          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 2000)),
-        ]));
-      if (reg && typeof reg.showNotification === 'function') {
-        await reg.showNotification(title, normalizedOptions);
-        return true;
-      }
+    const reg = await getActiveServiceWorkerRegistration();
+    if (reg && typeof reg.showNotification === 'function') {
+      await reg.showNotification(title, normalizedOptions);
+      return true;
     }
   } catch {
     // Fallback to direct Notification constructor below when supported
@@ -280,10 +441,14 @@ async function showBrowserOrSwNotification(
 
 function buildAlertFeedbackMessage(params: {
   osNotificationDelivered: boolean;
+  backgroundPushActive: boolean;
   permissionState: NotificationPermissionState;
   inIframe: boolean;
 }): string {
-  const { osNotificationDelivered, permissionState, inIframe } = params;
+  const { osNotificationDelivered, backgroundPushActive, permissionState, inIframe } = params;
+  if (backgroundPushActive && osNotificationDelivered) {
+    return 'Phone Alerts ON (Background Web Push + Sound + Vibration). You will receive SURE signals and TP/SL hits even when the app is closed or screen is locked.';
+  }
   if (osNotificationDelivered) {
     return 'Phone Alerts ON (System Push + Sound + Vibration). You will be notified on SURE signals and TP/SL hits.';
   }
@@ -291,15 +456,15 @@ function buildAlertFeedbackMessage(params: {
     return 'System permission granted & Sound/Vibration alerts ON! Live SURE signals and TP/SL outcomes will ring and notify.';
   }
   if (inIframe) {
-    return 'Sound, Vibration & In-App Alerts ON! Browser preview iframe blocks OS push popups — install or open the direct App URL for lock-screen push alerts.';
+    return 'Sound, Vibration & In-App Alerts ON! Browser preview iframe blocks OS push popups — install or open the direct App URL for closed-app lock-screen push alerts.';
   }
   if (permissionState === 'unsupported') {
-    return 'Sound, Vibration & In-App Alerts ON! On mobile Safari/iOS, tap Share → Add to Home Screen and open from Home Screen for lock-screen push notifications.';
+    return 'Sound, Vibration & In-App Alerts ON! On mobile Safari/iOS, tap Share → Add to Home Screen and open from Home Screen for background push notifications.';
   }
   if (permissionState === 'denied') {
     return 'Sound & In-App Alerts ON, but browser Notifications are blocked in site settings. Tap the lock icon in your address bar → Allow Notifications.';
   }
-  return 'Sound, Vibration & In-App Alerts ON! Tap Test Alert and choose Allow when prompted to enable lock-screen push popups.';
+  return 'Sound, Vibration & In-App Alerts ON! Tap Test Alert and choose Allow when prompted to enable lock-screen background push popups.';
 }
 
 export async function enableAndTestPhoneAlerts(): Promise<EnableAlertsResult> {
@@ -308,33 +473,46 @@ export async function enableAndTestPhoneAlerts(): Promise<EnableAlertsResult> {
   // IMPORTANT: Trigger requestPermission synchronously BEFORE awaiting AudioContext.resume()
   // so iOS Safari and Android Chrome preserve the user activation gesture.
   const permPromise =
-    permBefore === 'granted' ? Promise.resolve<NotificationPermissionState>('granted') : requestPhoneNotificationPermission();
+    permBefore === 'granted'
+      ? Promise.resolve<NotificationPermissionState>('granted')
+      : requestPhoneNotificationPermission();
 
   setPhoneAlertsEnabledPref(true);
   await unlockAlertAudio();
   const permissionState = await permPromise;
 
   const soundPlayed = await playSureSignalAlertFeedback();
-  const osNotificationDelivered =
-    permissionState === 'granted'
-      ? await showBrowserOrSwNotification('LEADERS XAUUSD · Alerts Ready', {
-          body: 'Phone alerts are active. You will be notified on new SURE signals and TP HIT / SL HIT outcomes.',
-          icon: '/pwa-192x192.png',
-          badge: '/pwa-192x192.png',
-          tag: 'leaders-sure-test',
-          renotify: true,
-          vibrate: [160, 80, 160],
-        })
-      : false;
+  let backgroundPushActive = false;
+  let osNotificationDelivered = false;
+
+  if (permissionState === 'granted') {
+    const pushSub = await ensureWebPushSubscribed();
+    backgroundPushActive = pushSub.subscribed;
+    if (pushSub.subscribed) {
+      osNotificationDelivered = await sendServerTestWebPush(pushSub.endpoint);
+    }
+    if (!osNotificationDelivered) {
+      osNotificationDelivered = await showBrowserOrSwNotification('LEADERS XAUUSD · Alerts Ready', {
+        body: 'Phone alerts are active. You will be notified on new SURE signals and TP HIT / SL HIT outcomes.',
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        tag: 'leaders-sure-test',
+        renotify: true,
+        vibrate: [160, 80, 160],
+      });
+    }
+  }
 
   return {
     alertsEnabled: true,
     permissionState,
     inIframe,
     osNotificationDelivered,
+    backgroundPushActive,
     soundPlayed,
     message: buildAlertFeedbackMessage({
       osNotificationDelivered,
+      backgroundPushActive,
       permissionState,
       inIframe,
     }),
@@ -470,6 +648,12 @@ export async function notifyNewSureSignalOnPhone(entry: SureSignalEntry): Promis
 
   await playSureSignalAlertFeedback();
 
+  // When Web Push subscription is active, server sureScanner already dispatches
+  // the SW OS notification with the exact same tag — skip local duplicate popup.
+  if (await hasActiveWebPushSubscription()) {
+    return true;
+  }
+
   const arrow = entry.direction === 'BUY' ? '▲ SURE BUY' : '▼ SURE SELL';
   const title = `${arrow} · XAU/USD $${entry.spotPrice.toFixed(2)}`;
   const body = `Score ${entry.setupScore ?? entry.confidencePct}/100 · Entry $${entry.tradeLevels.referencePrice.toFixed(
@@ -503,6 +687,10 @@ export async function notifySureSignalOutcomeOnPhone(entry: SureSignalEntry): Pr
 
   await playSureSignalAlertFeedback();
 
+  if (await hasActiveWebPushSubscription()) {
+    return true;
+  }
+
   const isTp = entry.status === 'TP_HIT';
   const isAmbiguous = entry.status === 'AMBIGUOUS';
   const title = isTp
@@ -528,6 +716,7 @@ export async function notifySureSignalOutcomeOnPhone(entry: SureSignalEntry): Pr
 
 export async function sendTestPhoneNotification(): Promise<{
   osSent: boolean;
+  backgroundPushActive: boolean;
   soundPlayed: boolean;
   inIframe: boolean;
   permissionState: NotificationPermissionState;
@@ -543,21 +732,37 @@ export async function sendTestPhoneNotification(): Promise<{
   await unlockAlertAudio();
   const permissionState = await permPromise;
   const soundPlayed = await playSureSignalAlertFeedback();
-  const osSent = await showBrowserOrSwNotification('LEADERS XAUUSD · Alerts Ready', {
-    body: 'Phone alerts are active. You will be notified on new SURE signals and instant TP HIT / SL HIT outcomes.',
-    icon: '/pwa-192x192.png',
-    badge: '/pwa-192x192.png',
-    tag: 'leaders-sure-test',
-    renotify: true,
-    vibrate: [160, 80, 160],
-  });
+
+  let backgroundPushActive = false;
+  let osSent = false;
+
+  if (permissionState === 'granted') {
+    const pushSub = await ensureWebPushSubscribed();
+    backgroundPushActive = pushSub.subscribed;
+    if (pushSub.subscribed) {
+      osSent = await sendServerTestWebPush(pushSub.endpoint);
+    }
+    if (!osSent) {
+      osSent = await showBrowserOrSwNotification('LEADERS XAUUSD · Alerts Ready', {
+        body: 'Phone alerts are active. You will be notified on new SURE signals and instant TP HIT / SL HIT outcomes.',
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        tag: 'leaders-sure-test',
+        renotify: true,
+        vibrate: [160, 80, 160],
+      });
+    }
+  }
+
   return {
     osSent,
+    backgroundPushActive,
     soundPlayed,
     inIframe,
     permissionState,
     message: buildAlertFeedbackMessage({
       osNotificationDelivered: osSent,
+      backgroundPushActive,
       permissionState,
       inIframe,
     }),

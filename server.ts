@@ -23,6 +23,13 @@ import {
   subscribeSureSignalUpdates,
 } from './server/sureScanner.ts';
 import { deleteSureSignalById } from './server/sureSignalsStore.ts';
+import {
+  getPushSubscriptionCount,
+  getVapidPublicKey,
+  removePushSubscription,
+  sendTestPushToSubscription,
+  upsertPushSubscription,
+} from './server/webPushStore.ts';
 
 interface CachedJpgExport {
   buffer: Buffer;
@@ -318,6 +325,56 @@ async function startServer() {
     }
     const status = await handleSureSignalDeleted(req.params.id);
     res.json({ deleted: true, id: req.params.id, sureStatus: status });
+  });
+
+  app.get('/api/push/vapid-public-key', async (_req, res) => {
+    try {
+      const publicKey = await getVapidPublicKey();
+      const subscriberCount = await getPushSubscriptionCount();
+      res.json({ publicKey, supported: true, subscriberCount });
+    } catch (err) {
+      res.status(500).json({
+        supported: false,
+        error: err instanceof Error ? err.message : 'Unable to initialize Web Push keys',
+      });
+    }
+  });
+
+  app.post('/api/push/subscribe', async (req, res) => {
+    try {
+      const result = await upsertPushSubscription(
+        req.body?.subscription,
+        req.get('user-agent')
+      );
+      res.json({ subscribed: result.saved, count: result.count });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Invalid push subscription',
+      });
+    }
+  });
+
+  app.post('/api/push/unsubscribe', async (req, res) => {
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
+    if (!endpoint) {
+      res.status(400).json({ error: 'Missing endpoint' });
+      return;
+    }
+    const removed = await removePushSubscription(endpoint);
+    res.json({ unsubscribed: true, removed });
+  });
+
+  app.post('/api/push/test', async (req, res) => {
+    try {
+      const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : undefined;
+      const result = await sendTestPushToSubscription(endpoint);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({
+        delivered: false,
+        error: err instanceof Error ? err.message : 'Failed to deliver Web Push test',
+      });
+    }
   });
 
   app.post('/api/export/jpg', express.json({ limit: '8mb' }), (req, res) => {

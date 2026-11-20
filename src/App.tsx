@@ -42,8 +42,11 @@ import {
   notifyNewSureSignalOnPhone,
   notifySureSignalOutcomeOnPhone,
   reconcileSureStatusTransitions,
+  subscribeNotificationPermissionSync,
+  syncWebPushSubscriptionIfEnabled,
   unlockAlertAudio,
 } from './utils/phoneNotifications.ts';
+import { publishLiveQuote, useLiveQuoteState } from './contexts/LiveQuoteContext.tsx';
 import { useAuth } from './contexts/AuthContext.tsx';
 import { LoginScreen } from './components/LoginScreen.tsx';
 import { NewsCalendarView } from './components/NewsCalendarView.tsx';
@@ -52,6 +55,7 @@ import { SignalsView } from './components/SignalsView.tsx';
 import { SmoothedPriceText } from './components/SmoothedPriceText.tsx';
 import { SureSignalsView } from './components/SureSignalsView.tsx';
 import { TradeView } from './components/TradeView.tsx';
+import { useOnlineStatus } from './hooks/usePWAInstall.ts';
 
 type BottomTab = 'TRADE' | 'NEWS' | 'SURE' | 'SIGNALS' | 'PROFILE';
 
@@ -60,11 +64,8 @@ interface BannerNotification {
   entry: SureSignalEntry;
 }
 
-const HeaderPriceStatus = memo(function HeaderPriceStatus({
-  quote,
-}: {
-  quote: MarketQuote | null;
-}) {
+const HeaderPriceStatus = memo(function HeaderPriceStatus() {
+  const { quote } = useLiveQuoteState();
   const validPrice =
     quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0 ? quote.mid : null;
 
@@ -98,9 +99,15 @@ const HeaderPriceStatus = memo(function HeaderPriceStatus({
 
 export default function App() {
   const { user, loading: authLoading } = useAuth();
-  const [activeTab, setActiveTab] = useState<BottomTab>('TRADE');
-  const [quote, setQuote] = useState<MarketQuote | null>(null);
-  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<BottomTab>(() => {
+    if (typeof window !== 'undefined') {
+      const tabParam = new URLSearchParams(window.location.search).get('tab');
+      if (tabParam === 'SURE' || tabParam === 'NEWS' || tabParam === 'SIGNALS' || tabParam === 'PROFILE') {
+        return tabParam;
+      }
+    }
+    return 'TRADE';
+  });
   const [serverReports, setServerReports] = useState<AnalysisReport[]>([]);
   const [firestoreReports, setFirestoreReports] = useState<AnalysisReport[]>([]);
   const [serverReportsLoading, setServerReportsLoading] = useState(true);
@@ -118,8 +125,11 @@ export default function App() {
   const [newsError, setNewsError] = useState<string | null>(null);
   const [unreadSureAlert, setUnreadSureAlert] = useState(false);
   const [bannerAlert, setBannerAlert] = useState<BannerNotification | null>(null);
+  const isOnline = useOnlineStatus();
 
   const pollStateRef = useRef<AdaptivePollState>(createAdaptivePollState());
+  const latestQuoteRef = useRef<MarketQuote | null>(null);
+  const latestQuoteErrorRef = useRef<string | null>(null);
   const quoteInFlightRef = useRef(false);
   const lastStreamAtRef = useRef(0);
   const activeTabRef = useRef<BottomTab>(activeTab);
@@ -138,18 +148,20 @@ export default function App() {
 
   const applyIncomingQuote = useCallback((nextQuote: MarketQuote | null, ok: boolean) => {
     if (nextQuote && nextQuote.freshness !== 'UNAVAILABLE' && nextQuote.mid > 0) {
-      setQuote(nextQuote);
-      setQuoteError(null);
+      latestQuoteRef.current = nextQuote;
+      latestQuoteErrorRef.current = null;
+      publishLiveQuote(nextQuote, null);
       pollStateRef.current = evaluateAdaptivePollInterval(pollStateRef.current, nextQuote);
       return;
     }
 
     if (nextQuote) {
-      setQuote(nextQuote);
+      latestQuoteRef.current = nextQuote;
     }
     if (!ok) {
-      setQuoteError('DATA UNAVAILABLE');
+      latestQuoteErrorRef.current = 'DATA UNAVAILABLE';
     }
+    publishLiveQuote(latestQuoteRef.current, latestQuoteErrorRef.current);
     pollStateRef.current = evaluateAdaptivePollInterval(pollStateRef.current, null);
   }, []);
 
@@ -468,9 +480,22 @@ export default function App() {
     };
   }, [user]);
 
+  // Sync browser Web Push (VAPID) subscription on boot and whenever notification permission becomes granted
+  useEffect(() => {
+    if (!user) return;
+    void syncWebPushSubscriptionIfEnabled();
+    return subscribeNotificationPermissionSync((perm) => {
+      if (perm === 'granted') {
+        void syncWebPushSubscriptionIfEnabled();
+      }
+    });
+  }, [user]);
+
   useEffect(() => {
     if (!user) {
-      setActiveTab('TRADE');
+      if (!authLoading) {
+        setActiveTab('TRADE');
+      }
       return;
     }
 
@@ -639,6 +664,7 @@ export default function App() {
     };
   }, [
     user,
+    authLoading,
     applyIncomingQuote,
     applyIncomingSureStatus,
     fetchNewsCalendar,
@@ -784,8 +810,8 @@ export default function App() {
         activeTab === 'PROFILE' ? 'bg-[#F5EEDB] text-[#09090B]' : 'bg-[#09090B] text-[#F4F4F5]'
       }`}
     >
-      {/* Compact Sticky Top Bar (52px) */}
-      <header className="sticky top-0 z-30 h-[52px] bg-[#09090B]/96 backdrop-blur-sm border-b border-white/10 transform-gpu">
+      {/* Compact Sticky Top Bar (52px) — opaque surface to eliminate mobile backdrop-blur scroll lag */}
+      <header className="sticky top-0 z-30 h-[52px] bg-[#09090B]/[0.98] border-b border-white/10">
         <div className="max-w-7xl mx-auto h-full px-4 sm:px-6 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
             <img
@@ -799,9 +825,16 @@ export default function App() {
             </div>
           </div>
 
-          <HeaderPriceStatus quote={quote} />
+          <HeaderPriceStatus />
         </div>
       </header>
+
+      {!isOnline && (
+        <div className="fixed bottom-[66px] left-3 z-40 flex items-center gap-2 rounded-full bg-amber-500 px-3 py-1 text-[11px] font-semibold text-[#09090B] shadow-lg">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#09090B] animate-pulse" />
+          Offline — Cached View
+        </div>
+      )}
 
       {/* In-App Alert Banner when a SURE signal or TP/SL outcome triggers (directional NEW banners suppressed during news pause) */}
       {bannerAlert && !(isNewsPaused && bannerAlert.kind === 'NEW') && (
@@ -882,10 +915,9 @@ export default function App() {
             : 'flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 pt-3 pb-20'
         }
       >
-        {activeTab === 'TRADE' ? (
+        <div className={activeTab === 'TRADE' ? 'block' : 'hidden'} aria-hidden={activeTab !== 'TRADE'}>
           <TradeView
-            quote={quote}
-            quoteError={quoteError}
+            isActive={activeTab === 'TRADE'}
             reports={reports}
             reportsLoading={reportsLoading}
             newsProtection={effectiveNewsProtection}
@@ -894,7 +926,8 @@ export default function App() {
             onDeleteReport={handleDeleteReport}
             onNewsProtectionSync={setNewsProtection}
           />
-        ) : activeTab === 'NEWS' ? (
+        </div>
+        {activeTab === 'NEWS' ? (
           <NewsCalendarView
             calendar={newsCalendar}
             loading={newsLoading}
@@ -917,15 +950,15 @@ export default function App() {
             onDeleteReport={handleDeleteReport}
             onGoToTrade={handleGoToTrade}
           />
-        ) : (
+        ) : activeTab === 'PROFILE' ? (
           <ProfileView />
-        )}
+        ) : null}
       </main>
 
       {/* Bottom Navigation — Trade | News | Sure | Signal | Profile */}
       <nav
         aria-label="Primary Bottom Navigation"
-        className="fixed bottom-0 left-0 right-0 z-40 h-[58px] bg-[#0B0C10]/96 backdrop-blur-sm border-t border-white/10 pb-[env(safe-area-inset-bottom)] transform-gpu"
+        className="fixed bottom-0 left-0 right-0 z-40 h-[58px] bg-[#0B0C10]/[0.98] border-t border-white/10 pb-[env(safe-area-inset-bottom)]"
       >
         <div className="max-w-xl mx-auto h-full grid grid-cols-5 items-center px-1">
           <button

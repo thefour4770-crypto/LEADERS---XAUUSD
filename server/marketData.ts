@@ -46,6 +46,9 @@ let inFlightQuotePromise: Promise<MarketQuote> | null = null;
 let lastEmittedQuoteKey = '';
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let spotStoreLoaded = false;
+const IS_TEST_ENV = Boolean(
+  process.env.NODE_TEST_CONTEXT || process.argv.some((a) => a.includes('--test'))
+);
 
 async function ensureSpotStoreLoaded(): Promise<void> {
   if (spotStoreLoaded) return;
@@ -82,7 +85,7 @@ async function ensureSpotStoreLoaded(): Promise<void> {
 }
 
 function schedulePersistSpotCandles(): void {
-  if (persistTimer !== null) return;
+  if (IS_TEST_ENV || persistTimer !== null) return;
   persistTimer = setTimeout(async () => {
     persistTimer = null;
     try {
@@ -97,6 +100,7 @@ function schedulePersistSpotCandles(): void {
       // Non-fatal persistence error
     }
   }, 4_000);
+  persistTimer.unref?.();
 }
 
 type QuoteSubscriber = (quote: MarketQuote) => void;
@@ -148,7 +152,12 @@ function recordLiveSpotTick(price: number, timestampMs: number) {
       volume: 0,
     });
     if (liveSpot1mCandles.size > MAX_LIVE_SPOT_BARS) {
-      const oldestKey = Array.from(liveSpot1mCandles.keys()).sort((a, b) => a - b)[0];
+      let oldestKey: number | undefined;
+      for (const k of liveSpot1mCandles.keys()) {
+        if (oldestKey === undefined || k < oldestKey) {
+          oldestKey = k;
+        }
+      }
       if (oldestKey !== undefined) {
         liveSpot1mCandles.delete(oldestKey);
       }
@@ -158,7 +167,7 @@ function recordLiveSpotTick(price: number, timestampMs: number) {
 }
 
 function scheduleNextCollectorTick() {
-  if (collectorTimer !== null) return;
+  if (IS_TEST_ENV || collectorTimer !== null) return;
   const isActive =
     quoteSubscribers.size > 0 || Date.now() - lastClientActivityAt < COLLECTOR_IDLE_AFTER_MS;
   const delay = isActive ? COLLECTOR_ACTIVE_MS : COLLECTOR_IDLE_MS;
@@ -181,6 +190,7 @@ function scheduleNextCollectorTick() {
 }
 
 function touchLiveSpotCollector() {
+  if (IS_TEST_ENV) return;
   lastClientActivityAt = Date.now();
   if (collectorTimer === null) {
     scheduleNextCollectorTick();
@@ -188,7 +198,7 @@ function touchLiveSpotCollector() {
 }
 
 // Start background recorder immediately on server boot (skip side-effect under test context)
-if (!process.env.NODE_TEST_CONTEXT && !process.argv.some((a) => a.includes('--test'))) {
+if (!IS_TEST_ENV) {
   void ensureSpotStoreLoaded().then(() => {
     scheduleNextCollectorTick();
   });

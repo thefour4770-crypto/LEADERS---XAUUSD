@@ -13,6 +13,10 @@ import {
   type Time,
 } from 'lightweight-charts';
 import { Maximize2, RefreshCw, ZoomIn, ZoomOut } from 'lucide-react';
+import {
+  getLiveQuoteSnapshot,
+  subscribeLiveQuoteTicks,
+} from '../contexts/LiveQuoteContext.tsx';
 import type { Candle, ChartOverlaySeries, MarketQuote, Timeframe } from '../types/market.ts';
 
 const TIMEFRAME_SECONDS: Record<Timeframe, number> = {
@@ -39,7 +43,6 @@ interface XauUsdChartProps {
   onRefresh: () => void;
   onCandleRollover?: () => void;
   fullHeight?: boolean;
-  liveQuote?: MarketQuote | null;
 }
 
 interface CrosshairReadout {
@@ -105,7 +108,6 @@ export const XauUsdChart = memo(function XauUsdChart({
   onRefresh,
   onCandleRollover,
   fullHeight = false,
-  liveQuote = null,
 }: XauUsdChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -114,6 +116,7 @@ export const XauUsdChart = memo(function XauUsdChart({
   const overlaySeriesMapRef = useRef<Map<string, ISeriesApi<'Line'>>>(new Map());
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const lastFittedTfRef = useRef<Timeframe | null>(null);
+  const lastSeriesSigRef = useRef<string>('');
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
 
   // Persistent refs for continuous 60/120fps requestAnimationFrame loop
@@ -126,8 +129,12 @@ export const XauUsdChart = memo(function XauUsdChart({
   const lastCrosshairKeyRef = useRef<string | null>(null);
   const showVolumeRef = useRef<boolean>(showVolume);
   const hasExchangeVolumeRef = useRef<boolean>(hasExchangeVolume);
+  const timeframeRef = useRef<Timeframe>(timeframe);
+  const onCandleRolloverRef = useRef(onCandleRollover);
   showVolumeRef.current = showVolume;
   hasExchangeVolumeRef.current = hasExchangeVolume;
+  timeframeRef.current = timeframe;
+  onCandleRolloverRef.current = onCandleRollover;
 
   // Direct DOM refs keep OHLC price readout bar synchronized with candlestick at 60fps
   const ohlcOpenRef = useRef<HTMLElement | null>(null);
@@ -378,6 +385,7 @@ export const XauUsdChart = memo(function XauUsdChart({
       priceLinesRef.current = [];
       renderedBarRef.current = null;
       targetBarRef.current = null;
+      lastSeriesSigRef.current = '';
       lastPriceLineUpRef.current = null;
       lastCrosshairKeyRef.current = null;
     };
@@ -397,6 +405,7 @@ export const XauUsdChart = memo(function XauUsdChart({
     const volumeSeries = volumeSeriesRef.current;
     if (!chart || !candleSeries || !volumeSeries) return;
 
+    const liveQuote = getLiveQuoteSnapshot().quote;
     const synced = applyLiveQuoteToCandles(candles, timeframe, liveQuote);
     const timeframeChanged = lastFittedTfRef.current !== timeframe;
     const prevRendered = timeframeChanged ? null : renderedBarRef.current;
@@ -408,6 +417,36 @@ export const XauUsdChart = memo(function XauUsdChart({
         latestSynced.low = Math.min(latestSynced.low, prevRendered.low);
       }
     }
+
+    const prevHistorySig =
+      candles.length > 1
+        ? `${timeframe}:${candles.length}:${candles[0].time}:${candles[candles.length - 2].time}:${candles[candles.length - 2].close}:${showVolume}:${hasExchangeVolume}`
+        : `${timeframe}:${candles.length}:${showVolume}:${hasExchangeVolume}`;
+
+    if (
+      !timeframeChanged &&
+      synced.length > 1 &&
+      prevRendered &&
+      synced[synced.length - 1].time === prevRendered.time &&
+      lastSeriesSigRef.current === prevHistorySig
+    ) {
+      // Fast incremental path: history didn't shift, only update target bar smoothly
+      const targetLatest = { ...synced[synced.length - 1] };
+      candleMapRef.current.set(targetLatest.time, targetLatest);
+      targetBarRef.current = targetLatest;
+      if (Math.abs(targetLatest.close - prevRendered.close) >= 0.005) {
+        ensureRafLoopRunning();
+      } else if (
+        targetLatest.high !== prevRendered.high ||
+        targetLatest.low !== prevRendered.low ||
+        targetLatest.volume !== prevRendered.volume
+      ) {
+        pushCandleAndVolumeToChart(targetLatest);
+      }
+      return;
+    }
+
+    lastSeriesSigRef.current = prevHistorySig;
 
     const map = new Map<number, Candle>();
     for (const c of synced) map.set(c.time, c);
@@ -498,58 +537,61 @@ export const XauUsdChart = memo(function XauUsdChart({
     } else if (Math.abs(targetLatest.close - drawnLast.close) >= 0.005) {
       ensureRafLoopRunning();
     }
-    // liveQuote ticks flow incrementally through the dedicated smooth rAF effect below
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candles, timeframe, showVolume, hasExchangeVolume]);
+  }, [candles, timeframe, showVolume, hasExchangeVolume, ensureRafLoopRunning, syncOhlcDom]);
 
-  // Feed every incoming live quote into the continuous rAF interpolation target
+  // Subscribe directly to live quote ticks without triggering React re-renders
   useEffect(() => {
-    const prevBase = targetBarRef.current ?? renderedBarRef.current;
-    if (
-      !candleSeriesRef.current ||
-      !prevBase ||
-      !liveQuote ||
-      liveQuote.freshness === 'UNAVAILABLE' ||
-      !Number.isFinite(liveQuote.mid) ||
-      liveQuote.mid <= 0
-    ) {
-      return;
-    }
-
-    const tfSec = TIMEFRAME_SECONDS[timeframe];
-    const quoteSec = Math.floor(liveQuote.timestamp / 1000);
-    const targetPrice = Number(liveQuote.mid.toFixed(2));
-
-    if (quoteSec >= prevBase.time && quoteSec - prevBase.time < tfSec) {
-      targetBarRef.current = {
-        time: prevBase.time,
-        open: prevBase.open,
-        high: Math.max(prevBase.high, targetPrice),
-        low: Math.min(prevBase.low, targetPrice),
-        close: targetPrice,
-        volume: prevBase.volume,
-      };
-    } else if (quoteSec - prevBase.time >= tfSec) {
-      const bucket = Math.floor(quoteSec / tfSec) * tfSec;
-      const safeTime = bucket > prevBase.time ? bucket : prevBase.time + tfSec;
-      if (lastRolloverBucketRef.current !== safeTime) {
-        lastRolloverBucketRef.current = safeTime;
-        onCandleRollover?.();
+    const feedLiveQuote = (liveQuote: MarketQuote | null) => {
+      const prevBase = targetBarRef.current ?? renderedBarRef.current;
+      if (
+        !candleSeriesRef.current ||
+        !prevBase ||
+        !liveQuote ||
+        liveQuote.freshness === 'UNAVAILABLE' ||
+        !Number.isFinite(liveQuote.mid) ||
+        liveQuote.mid <= 0
+      ) {
+        return;
       }
-      targetBarRef.current = {
-        time: safeTime,
-        open: prevBase.close,
-        high: Math.max(prevBase.close, targetPrice),
-        low: Math.min(prevBase.close, targetPrice),
-        close: targetPrice,
-        volume: 0,
-      };
-    } else {
-      return;
-    }
 
-    ensureRafLoopRunning();
-  }, [liveQuote, timeframe, onCandleRollover, ensureRafLoopRunning]);
+      const tfSec = TIMEFRAME_SECONDS[timeframeRef.current];
+      const quoteSec = Math.floor(liveQuote.timestamp / 1000);
+      const targetPrice = Number(liveQuote.mid.toFixed(2));
+
+      if (quoteSec >= prevBase.time && quoteSec - prevBase.time < tfSec) {
+        targetBarRef.current = {
+          time: prevBase.time,
+          open: prevBase.open,
+          high: Math.max(prevBase.high, targetPrice),
+          low: Math.min(prevBase.low, targetPrice),
+          close: targetPrice,
+          volume: prevBase.volume,
+        };
+      } else if (quoteSec - prevBase.time >= tfSec) {
+        const bucket = Math.floor(quoteSec / tfSec) * tfSec;
+        const safeTime = bucket > prevBase.time ? bucket : prevBase.time + tfSec;
+        if (lastRolloverBucketRef.current !== safeTime) {
+          lastRolloverBucketRef.current = safeTime;
+          onCandleRolloverRef.current?.();
+        }
+        targetBarRef.current = {
+          time: safeTime,
+          open: prevBase.close,
+          high: Math.max(prevBase.close, targetPrice),
+          low: Math.min(prevBase.close, targetPrice),
+          close: targetPrice,
+          volume: 0,
+        };
+      } else {
+        return;
+      }
+
+      ensureRafLoopRunning();
+    };
+
+    feedLiveQuote(getLiveQuoteSnapshot().quote);
+    return subscribeLiveQuoteTicks(feedLiveQuote);
+  }, [ensureRafLoopRunning]);
 
   // Update indicator overlays
   useEffect(() => {

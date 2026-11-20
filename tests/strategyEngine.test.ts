@@ -718,3 +718,111 @@ test('10. Notification reconciler detects NEW signals, TP/SL/AMBIGUOUS transitio
   assert.ok(r4.events.some((e) => e.kind === 'SL_HIT' && e.entry.id === 'sig-live-1'));
   assert.ok(r4.events.some((e) => e.kind === 'NEW' && e.entry.id === 'sig-live-2'));
 });
+
+test('11. SURE blocks overextended/exhausted chasing entries & anchors SL past 5m sweep structure', () => {
+  const indicators = createAutoPerfectIndicators();
+
+  // Baseline valid SURE BUY signal must anchor SL below swept 5m low with >= 1.15x ATR cushion
+  const bull = buildBullishDatasets(3780);
+  const validSure = evaluateStrictMultiTimeframeStrategy({
+    datasets: bull.datasets,
+    quote: bull.quote,
+    indicatorConfigs: indicators,
+    mode: 'SURE',
+    nowMs: NOW_MS,
+  });
+  assert.equal(validSure.evaluation.action, 'BUY');
+  assert.ok(validSure.tradeLevels);
+  assert.ok(
+    validSure.tradeLevels!.riskPoints >= validSure.tradeLevels!.atrValue * 1.15,
+    `Expected SURE SL distance >= 1.15x ATR, got risk=${validSure.tradeLevels!.riskPoints} vs atr=${validSure.tradeLevels!.atrValue}`
+  );
+
+  // Extended chasing scenario: live Spot price spikes far away (>2.5x ATR above 5m EMA21) after the sweep
+  const chasedBull = buildBullishDatasets(3780);
+  const atr5mApprox = validSure.tradeLevels!.atrValue;
+  const chasedSpot = Number((chasedBull.quote.mid + atr5mApprox * 3.2).toFixed(2));
+  const blockedChase = evaluateStrictMultiTimeframeStrategy({
+    datasets: chasedBull.datasets,
+    quote: makeQuote(chasedSpot, 0.6, 'LIVE'),
+    indicatorConfigs: indicators,
+    mode: 'SURE',
+    nowMs: NOW_MS,
+  });
+
+  assert.notEqual(blockedChase.evaluation.action, 'BUY', 'SURE must reject chasing extended price > 1.65x ATR from 5m EMA21');
+  assert.equal(blockedChase.tradeLevels, undefined);
+
+  // Oversold chasing scenario on BEARISH setup: 15m/5m pushed too deep (RSI exhaustion bounce risk)
+  const bear = buildBearishDatasets(3780);
+  const exhaustedSpot = Number((bear.quote.mid - atr5mApprox * 3.0).toFixed(2));
+  const blockedBearChase = evaluateStrictMultiTimeframeStrategy({
+    datasets: bear.datasets,
+    quote: makeQuote(exhaustedSpot, 0.6, 'LIVE'),
+    indicatorConfigs: indicators,
+    mode: 'SURE',
+    nowMs: NOW_MS,
+  });
+
+  assert.notEqual(blockedBearChase.evaluation.action, 'SELL', 'SURE must reject oversold SELL chasing into bounce zone');
+  assert.equal(blockedBearChase.tradeLevels, undefined);
+});
+
+test('12. Mixed Spot (1m/5m) + GC=F Futures (15m/1H) translates 15m/1H levels accurately to Spot scale', () => {
+  const indicators = createAutoPerfectIndicators();
+  const bull = buildBullishDatasets(3780);
+  const BASIS_OFFSET = 25;
+
+  const shiftCandles = (candles: Candle[], offset: number): Candle[] =>
+    candles.map((c) => ({
+      ...c,
+      open: Number((c.open + offset).toFixed(2)),
+      high: Number((c.high + offset).toFixed(2)),
+      low: Number((c.low + offset).toFixed(2)),
+      close: Number((c.close + offset).toFixed(2)),
+    }));
+
+  bull.datasets.tf1H = makeDataset(
+    '1H',
+    shiftCandles(bull.datasets.tf1H.candles, BASIS_OFFSET),
+    'Yahoo Finance COMEX Gold (GC=F)'
+  );
+  bull.datasets.tf15m = makeDataset(
+    '15m',
+    shiftCandles(bull.datasets.tf15m.candles, BASIS_OFFSET),
+    'Yahoo Finance COMEX Gold (GC=F)'
+  );
+
+  const unshiftedRes = evaluateStrictMultiTimeframeStrategy({
+    datasets: buildBullishDatasets(3780).datasets,
+    quote: bull.quote,
+    indicatorConfigs: indicators,
+    mode: 'SURE',
+    nowMs: NOW_MS,
+  });
+
+  const mixedRes = evaluateStrictMultiTimeframeStrategy({
+    datasets: bull.datasets,
+    quote: bull.quote,
+    indicatorConfigs: indicators,
+    mode: 'SURE',
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(mixedRes.evaluation.feedIntegrity.valid, true);
+  assert.ok(
+    mixedRes.evaluation.feedIntegrity.basisDiffUsd != null &&
+      mixedRes.evaluation.feedIntegrity.basisDiffUsd >= 15 &&
+      mixedRes.evaluation.feedIntegrity.basisDiffUsd <= 30,
+    `Expected positive futures basis near +$${BASIS_OFFSET} (never ~0), got ${mixedRes.evaluation.feedIntegrity.basisDiffUsd}`
+  );
+  assert.equal(mixedRes.evaluation.action, 'BUY');
+  assert.ok(mixedRes.evaluation.structure15M.lastSwingLow != null);
+  assert.ok(unshiftedRes.evaluation.structure15M.lastSwingLow != null);
+  assert.ok(
+    Math.abs(mixedRes.evaluation.structure15M.lastSwingLow! - unshiftedRes.evaluation.structure15M.lastSwingLow!) < 8,
+    `Expected translated 15m swing low (${mixedRes.evaluation.structure15M.lastSwingLow}) to match Spot swing low (${unshiftedRes.evaluation.structure15M.lastSwingLow}) instead of staying +$${BASIS_OFFSET} higher`
+  );
+});
+
+

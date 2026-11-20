@@ -12,6 +12,7 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        useCredentials: true,
         includeAssets: [
           'icon.svg',
           'apple-touch-icon.png',
@@ -126,7 +127,7 @@ export default defineConfig(() => {
         },
         devOptions: {
           enabled: true,
-          type: 'module',
+          type: 'classic',
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like

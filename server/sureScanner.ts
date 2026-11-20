@@ -28,9 +28,13 @@ import {
   saveSureSignal,
   updateSureSignal,
 } from './sureSignalsStore.ts';
+import { sendSureOutcomeWebPush, sendSureSignalWebPush } from './webPushStore.ts';
 
 export const SURE_SCAN_INTERVAL_MS = 60_000;
-const POST_CLOSE_COOLDOWN_MS = 3 * 60_000; // Brief cooldown after TP/SL hit before same-direction re-entry
+const POST_TP_COOLDOWN_MS = 5 * 60_000; // Wait 5m after TP hit before re-entering same direction
+const POST_SL_SAME_DIR_COOLDOWN_MS = 15 * 60_000; // Wait 15m (3x 5m candles) after SL hit before same-direction re-entry
+const POST_SL_ANY_COOLDOWN_MS = 5 * 60_000; // Brief 5m pause after any SL hit
+const CONSECUTIVE_SL_COOLDOWN_MS = 30 * 60_000; // Pause 30m after 2 consecutive SL hits to avoid choppy whipsaw
 
 type SureSignalListener = (event: {
   type: 'sure_signal' | 'sure_status' | 'sure_outcome';
@@ -169,6 +173,7 @@ export async function reconcileMissedSpotCandlesForActiveTrade(): Promise<SureSi
       stats: computeSureHistoryStats(nextHistory),
     };
     broadcast('sure_outcome', { closedSignal: updated });
+    void sendSureOutcomeWebPush(updated);
   }
 
   return updated;
@@ -227,6 +232,7 @@ async function executeOutcomeCheckAtPrice(
   };
 
   broadcast('sure_outcome', { closedSignal: updated });
+  void sendSureOutcomeWebPush(updated);
 
   setTimeout(() => {
     void runSureSignalScan();
@@ -482,14 +488,31 @@ export async function runSureSignalScan(): Promise<SureSignalScanStatus> {
         tradeLevels &&
         evaluation.totalScore >= 90
       ) {
-        const lastClosed = existingHistory[0] ?? null;
-        const recentlyClosedSameDirection =
-          lastClosed != null &&
-          lastClosed.direction === evaluation.action &&
-          lastClosed.closedAt != null &&
-          scanStartedMs - new Date(lastClosed.closedAt).getTime() < POST_CLOSE_COOLDOWN_MS;
+        const lastClosed = existingHistory.find((h) => h.status !== 'ACTIVE' && h.closedAt != null) ?? null;
+        const closedAgeMs =
+          lastClosed?.closedAt != null
+            ? scanStartedMs - new Date(lastClosed.closedAt).getTime()
+            : Number.POSITIVE_INFINITY;
+        const recentDecided = existingHistory.filter(
+          (h) => h.status === 'TP_HIT' || h.status === 'SL_HIT'
+        );
+        const twoConsecutiveSl =
+          recentDecided.length >= 2 &&
+          recentDecided[0].status === 'SL_HIT' &&
+          recentDecided[1].status === 'SL_HIT';
 
-        if (!recentlyClosedSameDirection) {
+        const inPostCloseCooldown =
+          lastClosed != null &&
+          ((twoConsecutiveSl && closedAgeMs < CONSECUTIVE_SL_COOLDOWN_MS) ||
+            (lastClosed.status === 'SL_HIT' &&
+              (closedAgeMs < POST_SL_ANY_COOLDOWN_MS ||
+                (lastClosed.direction === evaluation.action &&
+                  closedAgeMs < POST_SL_SAME_DIR_COOLDOWN_MS))) ||
+            (lastClosed.status !== 'SL_HIT' &&
+              lastClosed.direction === evaluation.action &&
+              closedAgeMs < POST_TP_COOLDOWN_MS));
+
+        if (!inPostCloseCooldown) {
           const newEntry: SureSignalEntry = {
             id: crypto.randomUUID(),
             createdAt: new Date(scanStartedMs).toISOString(),
@@ -564,6 +587,9 @@ export async function runSureSignalScan(): Promise<SureSignalScanStatus> {
       };
 
       broadcast(emittedNewSignal ? 'sure_signal' : 'sure_status', { newSignal: emittedNewSignal });
+      if (emittedNewSignal) {
+        void sendSureSignalWebPush(emittedNewSignal);
+      }
       return latestStatus;
     } catch (err) {
       const history = await listSureSignals().catch(() => []);

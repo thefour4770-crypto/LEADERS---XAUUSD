@@ -7,6 +7,7 @@ import {
   INDICATOR_CATALOG,
   isAutoPerfectPresetSelected,
 } from '../constants/indicators.ts';
+import { useLiveQuoteState } from '../contexts/LiveQuoteContext.tsx';
 import type {
   AnalysisReport,
   Candle,
@@ -14,7 +15,6 @@ import type {
   ChartOverlaySeries,
   IndicatorCategory,
   IndicatorId,
-  MarketQuote,
   MarketSentiment24h,
   NewsProtectionState,
   SelectedIndicatorConfig,
@@ -28,6 +28,7 @@ import {
   setPhoneAlertsEnabledPref,
   subscribeNotificationPermissionSync,
   subscribePhoneAlertsPrefChange,
+  unsubscribeWebPush,
   type NotificationPermissionState,
 } from '../utils/phoneNotifications.ts';
 import { getReportSignalConfidence } from '../utils/signalConfidence.ts';
@@ -43,8 +44,7 @@ import { XauUsdChart } from './XauUsdChart.tsx';
 const EMPTY_CANDLES: Candle[] = [];
 
 interface TradeViewProps {
-  quote: MarketQuote | null;
-  quoteError: string | null;
+  isActive?: boolean;
   reports: AnalysisReport[];
   reportsLoading: boolean;
   newsProtection: NewsProtectionState | null;
@@ -54,9 +54,134 @@ interface TradeViewProps {
   onNewsProtectionSync?: (protection: NewsProtectionState) => void;
 }
 
+const TradeLivePriceStrip = memo(function TradeLivePriceStrip({
+  dataset,
+  lastCandleClose,
+  enabled,
+  onRefreshAll,
+}: {
+  dataset: CandleDataset | null;
+  lastCandleClose: number | null;
+  enabled: boolean;
+  onRefreshAll: () => void;
+}) {
+  const { quote, error: quoteError } = useLiveQuoteState();
+
+  const rawDisplayPrice =
+    quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
+      ? quote.mid
+      : lastCandleClose;
+
+  const freshnessLabel =
+    quote && quote.freshness !== 'UNAVAILABLE'
+      ? quote.freshness
+      : dataset?.freshness ?? 'UNAVAILABLE';
+
+  const latestDataTs =
+    quote?.freshness !== 'UNAVAILABLE' && quote?.timestamp
+      ? quote.timestamp
+      : dataset?.latestTimestamp ?? null;
+
+  const formattedUpdatedTime = useMemo(() => {
+    if (!latestDataTs) return null;
+    return new Date(latestDataTs).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }, [latestDataTs]);
+
+  return (
+    <section className="rounded-2xl border border-white/10 bg-[#121318] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
+            <span className="font-semibold text-[#F5D061]">XAU/USD</span>
+            <span>·</span>
+            <span>Spot Gold / US Dollar</span>
+            <span>·</span>
+            <span
+              className={`inline-flex items-center gap-1.5 font-semibold ${
+                freshnessLabel === 'LIVE'
+                  ? 'text-emerald-400'
+                  : freshnessLabel === 'DELAYED'
+                  ? 'text-amber-400'
+                  : 'text-red-400'
+              }`}
+            >
+              {freshnessLabel === 'LIVE' && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              )}
+              {freshnessLabel === 'UNAVAILABLE' ? 'DATA UNAVAILABLE' : freshnessLabel}
+            </span>
+          </div>
+
+          {rawDisplayPrice != null ? (
+            <div className="flex items-baseline gap-3">
+              <SmoothedPriceText
+                value={rawDisplayPrice}
+                enabled={enabled}
+                flashOnMove
+                className="text-3xl sm:text-4xl font-mono font-bold tabular-nums tracking-tight transition-colors duration-200"
+              />
+              {quote?.changeAbs != null && quote?.changePct != null && (
+                <span
+                  className={`text-xs font-mono font-semibold tabular-nums ${
+                    quote.changeAbs >= 0 ? 'text-emerald-400' : 'text-red-400'
+                  }`}
+                >
+                  {quote.changeAbs >= 0 ? '+' : ''}
+                  {quote.changeAbs.toFixed(2)} ({quote.changePct >= 0 ? '+' : ''}
+                  {quote.changePct.toFixed(2)}%)
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-red-400 text-sm font-semibold py-1">
+              <AlertCircle className="w-4 h-4" />
+              <span>DATA UNAVAILABLE — Cannot display spot price</span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col sm:items-end gap-1 text-xs font-mono tabular-nums text-zinc-400">
+          {quote && quote.freshness !== 'UNAVAILABLE' && (
+            <div>
+              Bid <span className="text-zinc-200">${quote.bid.toFixed(2)}</span> · Ask{' '}
+              <span className="text-zinc-200">${quote.ask.toFixed(2)}</span> · Spread{' '}
+              <span className="text-zinc-200">${quote.spread.toFixed(2)}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <span>
+              {formattedUpdatedTime
+                ? `Updated ${formattedUpdatedTime}`
+                : quoteError || 'Awaiting feed'}
+            </span>
+            <button
+              type="button"
+              onClick={onRefreshAll}
+              aria-label="Refresh quote"
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-[#F5D061] hover:bg-white/5 transition-colors"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {dataset && (
+        <div className="mt-2.5 pt-2.5 border-t border-white/8 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-zinc-500">
+          <span>Candles: {dataset.candleSource}</span>
+          <span>{dataset.volumeNote}</span>
+        </div>
+      )}
+    </section>
+  );
+});
+
 export const TradeView = memo(function TradeView({
-  quote,
-  quoteError,
+  isActive = true,
   reports,
   reportsLoading,
   newsProtection,
@@ -73,6 +198,7 @@ export const TradeView = memo(function TradeView({
   const [supportLevels, setSupportLevels] = useState<number[]>([]);
   const [resistanceLevels, setResistanceLevels] = useState<number[]>([]);
   const [overlays, setOverlays] = useState<ChartOverlaySeries[]>([]);
+  const [overlayRefreshSeq, setOverlayRefreshSeq] = useState(0);
   const [chartLoading, setChartLoading] = useState(true);
   const [chartError, setChartError] = useState<string | null>(null);
   const [showChart, setShowChart] = useState(false);
@@ -90,14 +216,25 @@ export const TradeView = memo(function TradeView({
   const [showAnalysisHistory, setShowAnalysisHistory] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
 
-  const indicatorsRef = useRef(indicators);
-  indicatorsRef.current = indicators;
+  const mountedRef = useRef(true);
+  const stageTimersRef = useRef<number[]>([]);
+  const datasetRef = useRef<CandleDataset | null>(null);
+  datasetRef.current = dataset;
   const [phoneAlertsEnabled, setPhoneAlertsEnabled] = useState<boolean>(() => isPhoneAlertsEnabled());
   const [notificationPerm, setNotificationPerm] = useState<NotificationPermissionState>(() =>
     getNotificationPermissionState()
   );
   const [alertFeedback, setAlertFeedback] = useState<string | null>(null);
   const [testingAlert, setTestingAlert] = useState(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stageTimersRef.current.forEach((id) => clearTimeout(id));
+      stageTimersRef.current = [];
+    };
+  }, []);
 
   useEffect(() => {
     const unsubPref = subscribePhoneAlertsPrefChange(setPhoneAlertsEnabled);
@@ -123,6 +260,7 @@ export const TradeView = memo(function TradeView({
       setPhoneAlertsEnabledPref(false);
       setPhoneAlertsEnabled(false);
       setAlertFeedback(null);
+      void unsubscribeWebPush();
       return;
     }
     const result = await enableAndTestPhoneAlerts();
@@ -142,42 +280,26 @@ export const TradeView = memo(function TradeView({
     }
   }, []);
 
-  const rawDisplayPrice =
-    quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
-      ? quote.mid
-      : dataset?.candles?.[dataset.candles.length - 1]?.close ?? null;
-
   const loadChartData = useCallback(async (tf: Timeframe, showSpinner = false) => {
     if (showSpinner) setChartLoading(true);
     try {
-      const [candlesRes, overlaysRes] = await Promise.all([
-        fetch(`/api/market/candles?timeframe=${encodeURIComponent(tf)}`),
-        fetch('/api/market/overlays', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ timeframe: tf, indicators: indicatorsRef.current }),
-        }),
-      ]);
-
+      const candlesRes = await fetch(`/api/market/candles?timeframe=${encodeURIComponent(tf)}`);
       if (!candlesRes.ok) {
         const errJson = await candlesRes.json().catch(() => ({}));
         throw new Error(errJson.error || 'Market candle feed unavailable');
       }
 
       const cJson = await candlesRes.json();
+      if (!mountedRef.current) return;
       setDataset(cJson.dataset);
       setSupportLevels(Array.isArray(cJson.supportLevels) ? cJson.supportLevels : []);
       setResistanceLevels(Array.isArray(cJson.resistanceLevels) ? cJson.resistanceLevels : []);
       setChartError(null);
-
-      if (overlaysRes.ok) {
-        const oJson = await overlaysRes.json();
-        setOverlays(Array.isArray(oJson.overlays) ? oJson.overlays : []);
-      }
     } catch (err) {
+      if (!mountedRef.current) return;
       setChartError(err instanceof Error ? err.message : 'Unable to load XAUUSD chart data');
     } finally {
-      setChartLoading(false);
+      if (mountedRef.current) setChartLoading(false);
     }
   }, []);
 
@@ -188,46 +310,54 @@ export const TradeView = memo(function TradeView({
       if (!res.ok || !json.sentiment) {
         throw new Error(json.error || 'DATA UNAVAILABLE');
       }
+      if (!mountedRef.current) return;
       setSentiment(json.sentiment);
       setSentimentError(null);
     } catch (err) {
+      if (!mountedRef.current) return;
       setSentimentError(err instanceof Error ? err.message : 'DATA UNAVAILABLE');
     } finally {
-      setSentimentLoading(false);
+      if (mountedRef.current) setSentimentLoading(false);
     }
   }, []);
 
-  // Load on timeframe change & poll (5s when chart is open, 15s when collapsed; skip while hidden)
+  const showingReport = activeReport !== null;
+
+  // Load candles on timeframe change or tab re-activation; pause polling when tab inactive or report open
   useEffect(() => {
-    loadChartData(activeChartTimeframe, true);
-    const pollMs = showChart || leaderViewOpen ? 5_000 : 15_000;
+    if (!isActive || showingReport) return;
+    const needsSpinner = !datasetRef.current || datasetRef.current.timeframe !== activeChartTimeframe;
+    void loadChartData(activeChartTimeframe, needsSpinner);
+    const pollMs = showChart || leaderViewOpen ? 5_000 : 30_000;
     const interval = setInterval(() => {
       if (!document.hidden) {
-        loadChartData(activeChartTimeframe, false);
+        void loadChartData(activeChartTimeframe, false);
       }
     }, pollMs);
     return () => clearInterval(interval);
-  }, [activeChartTimeframe, loadChartData, showChart, leaderViewOpen]);
+  }, [activeChartTimeframe, loadChartData, showChart, leaderViewOpen, isActive, showingReport]);
 
-  // Trigger an immediate quote sync when opening either chart (SSE keeps live ticks flowing ~750ms)
+  // Trigger an immediate quote sync when opening either chart
   useEffect(() => {
-    if (!showChart && !leaderViewOpen) return;
+    if (!isActive || (!showChart && !leaderViewOpen)) return;
     onRefreshQuote();
-  }, [showChart, leaderViewOpen, onRefreshQuote]);
+  }, [isActive, showChart, leaderViewOpen, onRefreshQuote]);
 
-  // Load 24h Market Sentiment & poll every 30s (skip while tab is hidden)
+  // Load 24h Market Sentiment & poll every 30s only while TRADE tab is active
   useEffect(() => {
-    loadSentiment();
+    if (!isActive || showingReport) return;
+    void loadSentiment();
     const interval = setInterval(() => {
       if (!document.hidden) {
-        loadSentiment();
+        void loadSentiment();
       }
     }, 30_000);
     return () => clearInterval(interval);
-  }, [loadSentiment]);
+  }, [loadSentiment, isActive, showingReport]);
 
-  // Recompute chart overlays promptly when indicators change
+  // Single unified effect for chart overlays (only fires once per indicator/timeframe/refresh change)
   useEffect(() => {
+    if (!isActive || showingReport) return;
     let cancelled = false;
     (async () => {
       try {
@@ -248,7 +378,7 @@ export const TradeView = memo(function TradeView({
     return () => {
       cancelled = true;
     };
-  }, [indicators, activeChartTimeframe]);
+  }, [indicators, activeChartTimeframe, overlayRefreshSeq, isActive, showingReport]);
 
   const handleToggleAnalysisTimeframe = useCallback((tf: Timeframe) => {
     setSelectedTimeframes((prev) => {
@@ -302,21 +432,23 @@ export const TradeView = memo(function TradeView({
 
   const handleRefreshAll = useCallback(() => {
     onRefreshQuote();
-    loadChartData(activeChartTimeframe, false);
-    loadSentiment();
+    void loadChartData(activeChartTimeframe, false);
+    setOverlayRefreshSeq((s) => s + 1);
+    void loadSentiment();
   }, [onRefreshQuote, loadChartData, activeChartTimeframe, loadSentiment]);
 
   const handleRefreshChartSpinner = useCallback(() => {
-    loadChartData(activeChartTimeframe, true);
+    void loadChartData(activeChartTimeframe, true);
+    setOverlayRefreshSeq((s) => s + 1);
   }, [loadChartData, activeChartTimeframe]);
 
   const handleCandleRollover = useCallback(() => {
-    loadChartData(activeChartTimeframe, false);
+    void loadChartData(activeChartTimeframe, false);
   }, [loadChartData, activeChartTimeframe]);
 
   const handleRefreshLeader = useCallback(() => {
     onRefreshQuote();
-    loadChartData(activeChartTimeframe, true);
+    void loadChartData(activeChartTimeframe, true);
   }, [onRefreshQuote, loadChartData, activeChartTimeframe]);
 
   const handleRunAnalysis = async () => {
@@ -324,16 +456,18 @@ export const TradeView = memo(function TradeView({
     const enabledCount = indicators.filter((i) => i.enabled).length;
     if (enabledCount === 0 || selectedTimeframes.length === 0) return;
 
+    stageTimersRef.current.forEach((id) => clearTimeout(id));
+    stageTimersRef.current = [];
+
     setAnalyzing(true);
     setStageIndex(0);
     setAnalysisErrStatus(null);
     setAnalysisErrMsg(null);
 
     // Honest early-stage timer while request executes; never advances past stage 3 until API resolves
-    const stageTimers: number[] = [];
-    stageTimers.push(window.setTimeout(() => setStageIndex((s) => Math.max(s, 1)), 280));
-    stageTimers.push(window.setTimeout(() => setStageIndex((s) => Math.max(s, 2)), 620));
-    stageTimers.push(window.setTimeout(() => setStageIndex((s) => Math.max(s, 3)), 980));
+    stageTimersRef.current.push(window.setTimeout(() => setStageIndex((s) => Math.max(s, 1)), 240));
+    stageTimersRef.current.push(window.setTimeout(() => setStageIndex((s) => Math.max(s, 2)), 520));
+    stageTimersRef.current.push(window.setTimeout(() => setStageIndex((s) => Math.max(s, 3)), 850));
 
     try {
       const res = await fetch('/api/analyze', {
@@ -346,7 +480,9 @@ export const TradeView = memo(function TradeView({
       });
 
       const json = await res.json().catch(() => ({}));
-      stageTimers.forEach((id) => clearTimeout(id));
+      stageTimersRef.current.forEach((id) => clearTimeout(id));
+      stageTimersRef.current = [];
+      if (!mountedRef.current) return;
 
       if (res.status === 423 && json.newsProtection) {
         onNewsProtectionSync?.(json.newsProtection as NewsProtectionState);
@@ -362,19 +498,14 @@ export const TradeView = memo(function TradeView({
         return;
       }
 
-      // Now honestly complete final stages
-      setStageIndex(4);
-      await new Promise((r) => setTimeout(r, 220));
-      setStageIndex(5);
-      await new Promise((r) => setTimeout(r, 220));
       setStageIndex(6);
-      await new Promise((r) => setTimeout(r, 150));
-
       onReportSaved(json.report);
       setActiveReport(json.report);
       setAnalyzing(false);
     } catch (err) {
-      stageTimers.forEach((id) => clearTimeout(id));
+      stageTimersRef.current.forEach((id) => clearTimeout(id));
+      stageTimersRef.current = [];
+      if (!mountedRef.current) return;
       setAnalysisErrStatus('DATA UNAVAILABLE');
       setAnalysisErrMsg(
         err instanceof Error ? err.message : 'Network connection failed while analysing XAUUSD data.'
@@ -398,21 +529,7 @@ export const TradeView = memo(function TradeView({
     () => dataset?.candles ?? EMPTY_CANDLES,
     [dataset?.candles]
   );
-  const freshnessLabel =
-    quote && quote.freshness !== 'UNAVAILABLE'
-      ? quote.freshness
-      : dataset?.freshness ?? 'UNAVAILABLE';
-  const latestDataTs = quote?.freshness !== 'UNAVAILABLE' && quote?.timestamp
-    ? quote.timestamp
-    : dataset?.latestTimestamp ?? null;
-  const formattedUpdatedTime = useMemo(() => {
-    if (!latestDataTs) return null;
-    return new Date(latestDataTs).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  }, [latestDataTs]);
+  const lastCandleClose = chartCandles.length > 0 ? chartCandles[chartCandles.length - 1].close : null;
 
   const savedHistoryItems = useMemo(
     () =>
@@ -454,92 +571,13 @@ export const TradeView = memo(function TradeView({
 
   return (
     <div className="space-y-4 pb-6">
-      {/* Live XAUUSD Price Strip */}
-      <section className="rounded-2xl border border-white/10 bg-[#121318] p-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
-              <span className="font-semibold text-[#F5D061]">XAU/USD</span>
-              <span>·</span>
-              <span>Spot Gold / US Dollar</span>
-              <span>·</span>
-              <span
-                className={`inline-flex items-center gap-1.5 font-semibold ${
-                  freshnessLabel === 'LIVE'
-                    ? 'text-emerald-400'
-                    : freshnessLabel === 'DELAYED'
-                    ? 'text-amber-400'
-                    : 'text-red-400'
-                }`}
-              >
-                {freshnessLabel === 'LIVE' && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                )}
-                {freshnessLabel === 'UNAVAILABLE' ? 'DATA UNAVAILABLE' : freshnessLabel}
-              </span>
-            </div>
-
-            {rawDisplayPrice != null ? (
-              <div className="flex items-baseline gap-3">
-                <SmoothedPriceText
-                  value={rawDisplayPrice}
-                  enabled={!activeReport}
-                  flashOnMove
-                  className="text-3xl sm:text-4xl font-mono font-bold tabular-nums tracking-tight transition-colors duration-200"
-                />
-                {quote?.changeAbs != null && quote?.changePct != null && (
-                  <span
-                    className={`text-xs font-mono font-semibold tabular-nums ${
-                      quote.changeAbs >= 0 ? 'text-emerald-400' : 'text-red-400'
-                    }`}
-                  >
-                    {quote.changeAbs >= 0 ? '+' : ''}
-                    {quote.changeAbs.toFixed(2)} ({quote.changePct >= 0 ? '+' : ''}
-                    {quote.changePct.toFixed(2)}%)
-                  </span>
-                )}
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 text-red-400 text-sm font-semibold py-1">
-                <AlertCircle className="w-4 h-4" />
-                <span>DATA UNAVAILABLE — Cannot display spot price</span>
-              </div>
-            )}
-          </div>
-
-          <div className="flex flex-col sm:items-end gap-1 text-xs font-mono tabular-nums text-zinc-400">
-            {quote && quote.freshness !== 'UNAVAILABLE' && (
-              <div>
-                Bid <span className="text-zinc-200">${quote.bid.toFixed(2)}</span> · Ask{' '}
-                <span className="text-zinc-200">${quote.ask.toFixed(2)}</span> · Spread{' '}
-                <span className="text-zinc-200">${quote.spread.toFixed(2)}</span>
-              </div>
-            )}
-            <div className="flex items-center gap-2">
-              <span>
-                {formattedUpdatedTime
-                  ? `Updated ${formattedUpdatedTime}`
-                  : quoteError || 'Awaiting feed'}
-              </span>
-              <button
-                type="button"
-                onClick={handleRefreshAll}
-                aria-label="Refresh quote"
-                className="p-1.5 rounded-lg text-zinc-400 hover:text-[#F5D061] hover:bg-white/5 transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {dataset && (
-          <div className="mt-2.5 pt-2.5 border-t border-white/8 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-zinc-500">
-            <span>Candles: {dataset.candleSource}</span>
-            <span>{dataset.volumeNote}</span>
-          </div>
-        )}
-      </section>
+      {/* Live XAUUSD Price Strip (Isolated subscriber so ticks never re-render TradeView body) */}
+      <TradeLivePriceStrip
+        dataset={dataset}
+        lastCandleClose={lastCandleClose}
+        enabled={isActive && !activeReport}
+        onRefreshAll={handleRefreshAll}
+      />
 
       {/* High-Impact USD News Warning Box (positioned between Live Price & LEADER Section) */}
       {newsProtection && newsProtection.warningActive && (
@@ -744,7 +782,7 @@ export const TradeView = memo(function TradeView({
                     {!phoneAlertsEnabled
                       ? 'OFF · Tap to enable signal alerts'
                       : notificationPerm === 'granted'
-                      ? 'ON · Push, Sound & Vibration active'
+                      ? 'ON · Background Push, Sound & Vibration active'
                       : notificationPerm === 'denied'
                       ? 'Sound ON · OS Push blocked in site settings'
                       : notificationPerm === 'unsupported'
@@ -982,7 +1020,6 @@ export const TradeView = memo(function TradeView({
             error={chartError}
             onRefresh={handleRefreshChartSpinner}
             onCandleRollover={handleCandleRollover}
-            liveQuote={quote}
           />
         )}
 
@@ -1011,8 +1048,7 @@ export const TradeView = memo(function TradeView({
 
       {leaderViewOpen && (
         <LeaderChartFullView
-          quote={quote}
-          quoteError={quoteError}
+          lastCandleClose={lastCandleClose}
           candles={chartCandles}
           timeframe={activeChartTimeframe}
           loading={chartLoading}

@@ -1,10 +1,10 @@
 import { memo } from 'react';
 import { AlertCircle, X } from 'lucide-react';
+import { useLiveQuoteState } from '../contexts/LiveQuoteContext.tsx';
 import {
   ALL_TIMEFRAMES,
   type Candle,
   type ChartOverlaySeries,
-  type MarketQuote,
   type Timeframe,
 } from '../types/market.ts';
 import { SmoothedPriceText } from './SmoothedPriceText.tsx';
@@ -14,8 +14,7 @@ const EMPTY_OVERLAYS: ChartOverlaySeries[] = [];
 const EMPTY_LEVELS: number[] = [];
 
 interface LeaderChartFullViewProps {
-  quote: MarketQuote | null;
-  quoteError: string | null;
+  lastCandleClose: number | null;
   candles: Candle[];
   timeframe: Timeframe;
   loading: boolean;
@@ -26,9 +25,86 @@ interface LeaderChartFullViewProps {
   onClose: () => void;
 }
 
+const LeaderHeaderPrice = memo(function LeaderHeaderPrice({
+  lastCandleClose,
+  hasCandles,
+}: {
+  lastCandleClose: number | null;
+  hasCandles: boolean;
+}) {
+  const { quote, error: quoteError } = useLiveQuoteState();
+
+  const rawDisplayPrice =
+    quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
+      ? quote.mid
+      : lastCandleClose;
+
+  const freshness =
+    quote && quote.freshness !== 'UNAVAILABLE'
+      ? quote.freshness
+      : hasCandles
+      ? 'DELAYED'
+      : 'UNAVAILABLE';
+
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <div className="flex items-center gap-2 text-xs font-mono">
+        <span className="font-display font-bold tracking-wide text-[#F5D061]">LEADER</span>
+        <span className="text-zinc-500">·</span>
+        <span className="font-semibold text-zinc-200">XAU/USD</span>
+        <span className="text-zinc-600">·</span>
+        <span
+          className={`inline-flex items-center gap-1.5 font-semibold ${
+            freshness === 'LIVE'
+              ? 'text-emerald-400'
+              : freshness === 'DELAYED'
+              ? 'text-amber-400'
+              : 'text-red-400'
+          }`}
+        >
+          {freshness === 'LIVE' && (
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          )}
+          {freshness === 'UNAVAILABLE' ? 'DATA UNAVAILABLE' : freshness}
+        </span>
+      </div>
+
+      {rawDisplayPrice != null ? (
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono tabular-nums">
+          <SmoothedPriceText
+            value={rawDisplayPrice}
+            flashOnMove
+            className="text-2xl sm:text-3xl font-bold transition-colors duration-200"
+          />
+          {quote?.changeAbs != null && quote?.changePct != null && (
+            <span
+              className={`text-xs font-semibold ${
+                quote.changeAbs >= 0 ? 'text-emerald-400' : 'text-red-400'
+              }`}
+            >
+              {quote.changeAbs >= 0 ? '+' : ''}
+              {quote.changeAbs.toFixed(2)} ({quote.changePct >= 0 ? '+' : ''}
+              {quote.changePct.toFixed(2)}%)
+            </span>
+          )}
+          {quote && quote.freshness !== 'UNAVAILABLE' && (
+            <span className="text-[11px] text-zinc-400">
+              Bid ${quote.bid.toFixed(2)} · Ask ${quote.ask.toFixed(2)}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5 text-xs text-red-400 font-semibold">
+          <AlertCircle className="w-3.5 h-3.5" />
+          <span>{quoteError || 'DATA UNAVAILABLE'}</span>
+        </div>
+      )}
+    </div>
+  );
+});
+
 export const LeaderChartFullView = memo(function LeaderChartFullView({
-  quote,
-  quoteError,
+  lastCandleClose,
   candles,
   timeframe,
   loading,
@@ -38,18 +114,6 @@ export const LeaderChartFullView = memo(function LeaderChartFullView({
   onCandleRollover,
   onClose,
 }: LeaderChartFullViewProps) {
-  const rawDisplayPrice =
-    quote && quote.freshness !== 'UNAVAILABLE' && quote.mid > 0
-      ? quote.mid
-      : candles[candles.length - 1]?.close ?? null;
-
-  const freshness =
-    quote && quote.freshness !== 'UNAVAILABLE'
-      ? quote.freshness
-      : candles.length > 0
-      ? 'DELAYED'
-      : 'UNAVAILABLE';
-
   return (
     <div
       className="fixed inset-0 z-50 h-[100dvh] w-screen bg-[#09090B] flex flex-col overflow-hidden"
@@ -60,59 +124,10 @@ export const LeaderChartFullView = memo(function LeaderChartFullView({
       {/* Compact Live Price Bar */}
       <header className="shrink-0 bg-[#0D0E12] border-b border-white/10 px-3 sm:px-5 py-2.5 space-y-2">
         <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0 space-y-0.5">
-            <div className="flex items-center gap-2 text-xs font-mono">
-              <span className="font-display font-bold tracking-wide text-[#F5D061]">LEADER</span>
-              <span className="text-zinc-500">·</span>
-              <span className="font-semibold text-zinc-200">XAU/USD</span>
-              <span className="text-zinc-600">·</span>
-              <span
-                className={`inline-flex items-center gap-1.5 font-semibold ${
-                  freshness === 'LIVE'
-                    ? 'text-emerald-400'
-                    : freshness === 'DELAYED'
-                    ? 'text-amber-400'
-                    : 'text-red-400'
-                }`}
-              >
-                {freshness === 'LIVE' && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                )}
-                {freshness === 'UNAVAILABLE' ? 'DATA UNAVAILABLE' : freshness}
-              </span>
-            </div>
-
-            {rawDisplayPrice != null ? (
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono tabular-nums">
-                <SmoothedPriceText
-                  value={rawDisplayPrice}
-                  flashOnMove
-                  className="text-2xl sm:text-3xl font-bold transition-colors duration-200"
-                />
-                {quote?.changeAbs != null && quote?.changePct != null && (
-                  <span
-                    className={`text-xs font-semibold ${
-                      quote.changeAbs >= 0 ? 'text-emerald-400' : 'text-red-400'
-                    }`}
-                  >
-                    {quote.changeAbs >= 0 ? '+' : ''}
-                    {quote.changeAbs.toFixed(2)} ({quote.changePct >= 0 ? '+' : ''}
-                    {quote.changePct.toFixed(2)}%)
-                  </span>
-                )}
-                {quote && quote.freshness !== 'UNAVAILABLE' && (
-                  <span className="text-[11px] text-zinc-400">
-                    Bid ${quote.bid.toFixed(2)} · Ask ${quote.ask.toFixed(2)}
-                  </span>
-                )}
-              </div>
-            ) : (
-              <div className="flex items-center gap-1.5 text-xs text-red-400 font-semibold">
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>{quoteError || 'DATA UNAVAILABLE'}</span>
-              </div>
-            )}
-          </div>
+          <LeaderHeaderPrice
+            lastCandleClose={lastCandleClose}
+            hasCandles={candles.length > 0}
+          />
 
           <button
             type="button"
@@ -162,7 +177,6 @@ export const LeaderChartFullView = memo(function LeaderChartFullView({
           onRefresh={onRefresh}
           onCandleRollover={onCandleRollover}
           fullHeight
-          liveQuote={quote}
         />
       </div>
     </div>

@@ -75,9 +75,9 @@ export async function fetchStrategyDatasets(): Promise<StrategyDatasetsInput> {
     fetchPureFuturesCandles('1m'),
   ]);
 
-  // Use pure Spot XAU/USD 1m stream once >= 60 bars exist (1m uses EMA9/21, ST10, RSI14, MACD, DMI14); 5m waits for 210 bars for EMA200 context
+  // Use pure Spot XAU/USD 1m & 5m streams once >= 60 bars exist (max 5m indicator warmup is EMA50/OBV20)
   const tf1m = spot1m && spot1m.candles.length >= 60 ? spot1m : f1m;
-  const tf5m = spot5m && spot5m.candles.length >= 210 ? spot5m : f5m;
+  const tf5m = spot5m && spot5m.candles.length >= 60 ? spot5m : f5m;
 
   return {
     tf1H: f1H,

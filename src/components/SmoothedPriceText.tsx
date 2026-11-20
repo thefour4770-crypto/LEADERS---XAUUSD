@@ -77,7 +77,7 @@ export const SmoothedPriceText = memo(function SmoothedPriceText({
     if (flashOnMove) {
       const prevFlashTarget = lastFlashTargetRef.current;
       lastFlashTargetRef.current = value;
-      if (prevFlashTarget !== null && value !== prevFlashTarget) {
+      if (prevFlashTarget !== null && Math.abs(value - prevFlashTarget) >= 0.01) {
         setFlashDir(value > prevFlashTarget ? 'up' : 'down');
         if (flashTimerRef.current !== null) {
           window.clearTimeout(flashTimerRef.current);

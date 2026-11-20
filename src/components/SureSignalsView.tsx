@@ -26,6 +26,7 @@ import {
   setPhoneAlertsEnabledPref,
   subscribeNotificationPermissionSync,
   subscribePhoneAlertsPrefChange,
+  unsubscribeWebPush,
   type NotificationPermissionState,
 } from '../utils/phoneNotifications.ts';
 import { TradeLevelsScale } from './TradeLevelsScale.tsx';
@@ -75,6 +76,52 @@ function formatDurationMs(durationMs: number | undefined | null): string {
   return `${secs}s`;
 }
 
+const SureScanCountdownText = memo(function SureScanCountdownText({
+  formattedLastScanTime,
+  isNewsPaused,
+  tradeLocked,
+  nextScanAt,
+}: {
+  formattedLastScanTime: string | null;
+  isNewsPaused: boolean;
+  tradeLocked: boolean;
+  nextScanAt: string | null | undefined;
+}) {
+  const [countdownSec, setCountdownSec] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (isNewsPaused || tradeLocked || !nextScanAt) {
+      setCountdownSec(null);
+      return;
+    }
+
+    const updateCountdown = () => {
+      const diffSec = Math.max(
+        0,
+        Math.ceil((new Date(nextScanAt).getTime() - Date.now()) / 1000)
+      );
+      setCountdownSec(diffSec);
+    };
+
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 1_000);
+    return () => window.clearInterval(timer);
+  }, [isNewsPaused, tradeLocked, nextScanAt]);
+
+  return (
+    <span>
+      {formattedLastScanTime ? `Last check ${formattedLastScanTime}` : 'Starting scan...'}
+      {isNewsPaused
+        ? ' · Auto Scan will resume after news stabilizes'
+        : tradeLocked
+        ? ' · New scan paused until SL or TP hits'
+        : countdownSec !== null
+        ? ` · Next scan ${countdownSec}s`
+        : ''}
+    </span>
+  );
+});
+
 export const SureSignalsView = memo(function SureSignalsView({
   sureStatus,
   newsProtection,
@@ -88,7 +135,6 @@ export const SureSignalsView = memo(function SureSignalsView({
   const [alertFeedback, setAlertFeedback] = useState<string | null>(null);
   const [testingAlert, setTestingAlert] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [countdownSec, setCountdownSec] = useState<number | null>(null);
 
   useEffect(() => {
     const unsubPref = subscribePhoneAlertsPrefChange(setAlertsEnabled);
@@ -99,28 +145,12 @@ export const SureSignalsView = memo(function SureSignalsView({
     };
   }, []);
 
-  useEffect(() => {
-    const updateCountdown = () => {
-      if (!sureStatus?.nextScanAt) {
-        setCountdownSec(null);
-        return;
-      }
-      const diffSec = Math.max(
-        0,
-        Math.ceil((new Date(sureStatus.nextScanAt).getTime() - Date.now()) / 1000)
-      );
-      setCountdownSec(diffSec);
-    };
-    updateCountdown();
-    const timer = window.setInterval(updateCountdown, 1_000);
-    return () => window.clearInterval(timer);
-  }, [sureStatus?.nextScanAt]);
-
   const handleTogglePhoneAlerts = useCallback(async () => {
     if (alertsEnabled) {
       setPhoneAlertsEnabledPref(false);
       setAlertsEnabled(false);
       setAlertFeedback(null);
+      void unsubscribeWebPush();
       return;
     }
 
@@ -374,18 +404,12 @@ export const SureSignalsView = memo(function SureSignalsView({
           </div>
           <div className="flex items-center gap-1.5 text-zinc-400">
             <Clock className="w-3.5 h-3.5" />
-            <span>
-              {formattedLastScanTime
-                ? `Last check ${formattedLastScanTime}`
-                : 'Starting scan...'}
-              {isNewsPaused
-                ? ' · Auto Scan will resume after news stabilizes'
-                : sureStatus?.tradeLocked
-                ? ' · New scan paused until SL or TP hits'
-                : countdownSec !== null
-                ? ` · Next scan ${countdownSec}s`
-                : ''}
-            </span>
+            <SureScanCountdownText
+              formattedLastScanTime={formattedLastScanTime}
+              isNewsPaused={isNewsPaused}
+              tradeLocked={Boolean(sureStatus?.tradeLocked)}
+              nextScanAt={sureStatus?.nextScanAt}
+            />
           </div>
         </div>
       </section>
